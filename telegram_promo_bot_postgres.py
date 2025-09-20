@@ -136,49 +136,58 @@ else:
     cur = conn.cursor()
 
     # create tables (sqlite dialect)
-    cur.executescript(\"\"\"
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        tg_id INTEGER UNIQUE,
+        id SERIAL PRIMARY KEY,
+        tg_id BIGINT UNIQUE,
         tg_username TEXT,
         site_username TEXT,
         role TEXT DEFAULT 'user',
-        status TEXT DEFAULT 'pending', -- pending, approved, rejected
+        status TEXT DEFAULT 'pending',
         rejected_at TIMESTAMP,
         registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
+    """)
 
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS promocodes (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         code TEXT UNIQUE,
         total_uses INTEGER,
         used INTEGER DEFAULT 0,
         added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
+    """)
 
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
         value TEXT
     );
+    """)
 
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS distribution (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
+        id SERIAL PRIMARY KEY,
+        user_id BIGINT,
         promo_id INTEGER,
         code TEXT,
         count INTEGER,
         source TEXT,
         given_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
+    """)
 
+    cur.execute("""
     CREATE TABLE IF NOT EXISTS weekly_users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        id SERIAL PRIMARY KEY,
         week_start DATE,
         position INTEGER,
         site_username TEXT,
-        user_id INTEGER
+        user_id BIGINT
     );
-    \"\"\")
+    """)
+
     conn.commit()
 
     # default settings initialization (sqlite style)
