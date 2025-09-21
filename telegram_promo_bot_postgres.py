@@ -1655,12 +1655,12 @@ async def start_webserver():
     print(f"✅ Web server started on port {PORT}")
 
 async def main():
-    # запускаем планировщик
     scheduler.start()
-    # запускаем http-сервер для Render
-    await start_webserver()
-    # запускаем Telegram polling
-    await dp.start_polling(bot)
+    # запускаем webserver и polling одновременно
+    await asyncio.gather(
+        start_webserver(),
+        dp.start_polling(bot)
+    )
 
 if __name__ == "__main__":
     try:
