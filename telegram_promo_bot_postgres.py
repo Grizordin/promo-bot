@@ -14,6 +14,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from aiohttp import web
 
 # ---------------- CONFIG ----------------
 # Token: keep fallback to original value so local usage doesn't break; you can set BOT_TOKEN in env on Render
@@ -1639,10 +1640,26 @@ async def set_commands():
             pass
 
 # ---------------- RUN ----------------
-import asyncio
+PORT = int(os.getenv("PORT", 10000))  # Render сам задаёт PORT
+
+async def handle(request):
+    return web.Response(text="Bot is running!")
+
+async def start_webserver():
+    app = web.Application()
+    app.router.add_get("/", handle)   # health-check на /
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    print(f"✅ Web server started on port {PORT}")
 
 async def main():
+    # запускаем планировщик
     scheduler.start()
+    # запускаем http-сервер для Render
+    await start_webserver()
+    # запускаем Telegram polling
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
