@@ -13,8 +13,13 @@ from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
-from aiogram.enums import AllowedUpdates
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+try:
+    from aiogram.enums import AllowedUpdates
+    allowed_updates = AllowedUpdates.all()
+except ImportError:
+    from aiogram.types import AllowedUpdates
+    allowed_updates = AllowedUpdates.ALL
 
 # ---------------- CONFIG ----------------
 # Token: keep fallback to original value so local usage doesn't break; you can set BOT_TOKEN in env on Render
@@ -1641,10 +1646,10 @@ async def set_commands():
 
 # ---------------- RUN ----------------
 async def main():
-    # запускаем планировщик
+    # запускаем планировщик задач
     scheduler.start()
-    # запускаем polling aiogram
-    await dp.start_polling(bot, allowed_updates=AllowedUpdates.all())
+    # запускаем бота
+    await dp.start_polling(bot, allowed_updates=allowed_updates)
 
 if __name__ == "__main__":
     try:
