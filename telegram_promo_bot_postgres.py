@@ -43,13 +43,12 @@ if DATABASE_URL:
     # Keep raw cursor factory for creating RealDictCursor when needed
     raw_pg_cursor = conn.cursor
 
-    def _pg_cursor():
+    def get_cursor():
         real_cur = raw_pg_cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         class CursorWrapper:
             def __init__(self, rc):
                 self._rc = rc
             def execute(self, query, params=None):
-                # convert sqlite-style '?' placeholders to psycopg2 '%s' if present
                 if params is not None and "?" in query:
                     q = query.replace("?", "%s")
                     return self._rc.execute(q, params)
@@ -59,19 +58,16 @@ if DATABASE_URL:
                     q = query.replace("?", "%s")
                     return self._rc.executemany(q, seq_of_params)
                 return self._rc.executemany(query, seq_of_params)
-            def fetchone(self):
-                return self._rc.fetchone()
-            def fetchall(self):
-                return self._rc.fetchall()
-            def __getattr__(self, name):
-                return getattr(self._rc, name)
+            def fetchone(self): return self._rc.fetchone()
+            def fetchall(self): return self._rc.fetchall()
+            def __getattr__(self, name): return getattr(self._rc, name)
         return CursorWrapper(real_cur)
 
     # override connection.cursor to return our wrapper (so existing code calling conn.cursor() works)
     conn.cursor = _pg_cursor
 
     # create tables for Postgres (SERIAL, BIGINT, etc.)
-    c = conn.cursor()
+    c = get_cursor()
     c.execute("""
     CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
@@ -209,7 +205,7 @@ def esc(s: Optional[str]) -> str:
     return html.escape(str(s))
 
 def db_get_setting(key: str) -> str:
-    c = conn.cursor()
+    c = get_cursor()
     if USE_POSTGRES:
         c.execute("SELECT value FROM settings WHERE key = %s", (key,))
     else:
@@ -218,7 +214,7 @@ def db_get_setting(key: str) -> str:
     return r["value"] if r else ""
 
 def db_set_setting(key: str, value: str):
-    c = conn.cursor()
+    c = get_cursor()
     if USE_POSTGRES:
         c.execute("INSERT INTO settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (key, value))
     else:
@@ -250,7 +246,7 @@ def get_week_start() -> str:
     return anchor.date().isoformat()
 
 def find_user_by_site(site_username: str):
-    c = conn.cursor()
+    c = get_cursor()
     if USE_POSTGRES:
         c.execute("SELECT * FROM users WHERE site_username = %s", (site_username,))
     else:
@@ -258,7 +254,7 @@ def find_user_by_site(site_username: str):
     return c.fetchone()
 
 def find_user_by_tgid(tg_id: int):
-    c = conn.cursor()
+    c = get_cursor()
     if USE_POSTGRES:
         c.execute("SELECT * FROM users WHERE tg_id = %s", (tg_id,))
     else:
@@ -266,7 +262,7 @@ def find_user_by_tgid(tg_id: int):
     return c.fetchone()
 
 def user_already_has_code(tg_id: int, code: str) -> bool:
-    c = conn.cursor()
+    c = get_cursor()
     if USE_POSTGRES:
         c.execute("SELECT 1 FROM distribution WHERE user_id = %s AND code = %s", (tg_id, code))
     else:
@@ -274,7 +270,7 @@ def user_already_has_code(tg_id: int, code: str) -> bool:
     return c.fetchone() is not None
 
 def add_promocodes(codes: List[str], total_uses: int):
-    c = conn.cursor()
+    c = get_cursor()
     now = now_msk().strftime("%Y-%m-%d %H:%M:%S")
     for code in codes:
         if USE_POSTGRES:
@@ -314,7 +310,7 @@ class FindUserState(StatesGroup):
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     tg_id = message.from_user.id
-    c = conn.cursor()
+    c = get_cursor()
     if USE_POSTGRES:
         c.execute("SELECT * FROM users WHERE tg_id = %s", (tg_id,))
     else:
@@ -352,7 +348,7 @@ async def process_registration_nick(message: Message, state: FSMContext):
     site_nick = message.text.strip()
     tg_id = message.from_user.id
     tg_username = message.from_user.username or message.from_user.full_name or ""
-    c = conn.cursor()
+    c = get_cursor()
     if USE_POSTGRES:
         c.execute("SELECT * FROM users WHERE site_username = %s AND tg_id != %s", (site_nick, tg_id))
     else:
@@ -363,7 +359,7 @@ async def process_registration_nick(message: Message, state: FSMContext):
         await state.clear()
         return
     # upsert user row: create or update
-    c = conn.cursor()
+    c = get_cursor()
     if USE_POSTGRES:
         c.execute("SELECT * FROM users WHERE tg_id = %s", (tg_id,))
     else:
@@ -405,7 +401,7 @@ async def cmd_promo(message: Message):
         return
 
     week = get_week_start()
-    c = conn.cursor()
+    c = get_cursor()
     if USE_POSTGRES:
         c.execute("""
             SELECT code
@@ -437,7 +433,7 @@ async def cmd_promo(message: Message):
 async def cmd_pending(message: Message):
     if message.from_user.id not in ADMIN_IDS:
         return
-    c = conn.cursor()
+    c = get_cursor()
     if USE_POSTGRES:
         c.execute("SELECT tg_id, tg_username, site_username, registered_at FROM users WHERE status = 'pending' ORDER BY registered_at")
     else:
@@ -466,7 +462,7 @@ async def cb_approve(callback: types.CallbackQuery):
         await callback.answer()
         return
     tgid = int(parts[1])
-    c = conn.cursor()
+    c = get_cursor()
     if USE_POSTGRES:
         c.execute("UPDATE users SET status='approved', rejected_at = NULL WHERE tg_id = %s", (tgid,))
     else:
@@ -492,7 +488,7 @@ async def cb_reject(callback: types.CallbackQuery):
         await callback.answer()
         return
     tgid = int(parts[1])
-    c = conn.cursor()
+    c = get_cursor()
     now_str = now_msk().isoformat()
     if USE_POSTGRES:
         c.execute("UPDATE users SET status='rejected', rejected_at = %s WHERE tg_id = %s", (now_str, tgid))
@@ -628,7 +624,7 @@ async def process_setusers_file(message: Message, state: FSMContext):
         return
 
     week = get_week_start()
-    c = conn.cursor()
+    c = get_cursor()
     if USE_POSTGRES:
         c.execute("DELETE FROM weekly_users WHERE week_start = %s", (week,))
     else:
@@ -663,7 +659,7 @@ async def cmd_missing(message: Message):
     if message.from_user.id not in ADMIN_IDS:
         return
     week = get_week_start()
-    c = conn.cursor()
+    c = get_cursor()
     if USE_POSTGRES:
         c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = %s AND (user_id IS NULL OR user_id = '') ORDER BY position", (week,))
     else:
@@ -694,7 +690,7 @@ async def cb_users_all(callback: types.CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         await callback.answer("Нет прав")
         return
-    c = conn.cursor()
+    c = get_cursor()
     c.execute("SELECT tg_id, site_username, tg_username, status FROM users ORDER BY registered_at")
     rows = c.fetchall()
     if not rows:
@@ -715,7 +711,7 @@ async def cb_users_free(callback: types.CallbackQuery):
         await callback.answer("Нет прав")
         return
     week = get_week_start()
-    c = conn.cursor()
+    c = get_cursor()
     if USE_POSTGRES:
         c.execute("""
             SELECT u.tg_id, u.site_username, u.tg_username
@@ -752,7 +748,7 @@ async def cmd_assign_start(message: Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
         return
     week = get_week_start()
-    c = conn.cursor()
+    c = get_cursor()
     if USE_POSTGRES:
         c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = %s AND (user_id IS NULL OR user_id = '') ORDER BY position", (week,))
     else:
@@ -776,7 +772,7 @@ async def assign_got_pos(message: Message, state: FSMContext):
         await message.answer("Введите корректный номер позиции (целое число).")
         return
     week = get_week_start()
-    c = conn.cursor()
+    c = get_cursor()
     if USE_POSTGRES:
         c.execute("SELECT * FROM weekly_users WHERE week_start = %s AND position = %s", (week, pos))
     else:
@@ -791,7 +787,7 @@ async def assign_got_pos(message: Message, state: FSMContext):
         await state.clear()
         return
     # list available users to choose
-    c = conn.cursor()
+    c = get_cursor()
     if USE_POSTGRES:
         c.execute("""
             SELECT u.tg_id, u.site_username, u.tg_username
@@ -842,7 +838,7 @@ async def cb_assign_choose(callback: types.CallbackQuery):
     pos = int(parts[1])
     tg_id = int(parts[2])
     week = get_week_start()
-    c = conn.cursor()
+    c = get_cursor()
     if USE_POSTGRES:
         c.execute("SELECT * FROM users WHERE tg_id = %s", (tg_id,))
     else:
@@ -879,7 +875,7 @@ async def givepromo_site_entered(message: Message, state: FSMContext):
         await state.clear()
         return
     tg_id = user["tg_id"]
-    c = conn.cursor()
+    c = get_cursor()
     c.execute("SELECT id, code, total_uses, used FROM promocodes ORDER BY added_at ASC, id ASC")
     promos = c.fetchall()
     available_codes = []
@@ -934,7 +930,7 @@ async def givepromo_qty(message: Message, state: FSMContext):
         return
     data = await state.get_data()
     tg_id = int(data.get("give_tg_id"))
-    c = conn.cursor()
+    c = get_cursor()
     c.execute("SELECT id, code, total_uses, used FROM promocodes ORDER BY added_at ASC, id ASC")
     promos = c.fetchall()
     choices = []
@@ -968,7 +964,7 @@ async def givepromo_codes_entered(message: Message, state: FSMContext):
     if len(set(parts)) != len(parts):
         await message.answer("Ошибка: нельзя выдавать одинаковые промо одному пользователю.")
         return
-    c = conn.cursor()
+    c = get_cursor()
     valid = []
     for code in parts:
         if USE_POSTGRES:
@@ -1023,7 +1019,7 @@ async def cmd_finduser_start(message: Message, state: FSMContext):
 @dp.message(FindUserState.waiting_for_input)
 async def finduser_handle(message: Message, state: FSMContext):
     term = message.text.strip()
-    c = conn.cursor()
+    c = get_cursor()
     user = None
     if term.isdigit():
         if USE_POSTGRES:
@@ -1070,7 +1066,7 @@ async def cb_find_assign(callback: types.CallbackQuery):
         return
     tid = int(callback.data.split(":",1)[1])
     week = get_week_start()
-    c = conn.cursor()
+    c = get_cursor()
     if USE_POSTGRES:
         c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = %s AND (user_id IS NULL OR user_id = '') ORDER BY position", (week,))
     else:
@@ -1093,7 +1089,7 @@ async def cb_find_assign(callback: types.CallbackQuery):
 async def cmd_promostats(message: Message):
     if message.from_user.id not in ADMIN_IDS:
         return
-    c = conn.cursor()
+    c = get_cursor()
     c.execute("SELECT id, code, total_uses, used, added_at FROM promocodes ORDER BY added_at ASC, id ASC")
     rows = c.fetchall()
     if not rows:
@@ -1110,7 +1106,7 @@ async def cmd_promostats(message: Message):
 
 # ---------------- DISTRIBUTION ALGORITHM (same approach as earlier) ----------------
 def compute_allocation_ordered() -> Dict[int, List[str]]:
-    c = conn.cursor()
+    c = get_cursor()
     week = get_week_start()
     if USE_POSTGRES:
         c.execute("SELECT position, site_username, user_id FROM weekly_users WHERE week_start = %s ORDER BY position", (week,))
@@ -1189,7 +1185,7 @@ def compute_allocation_ordered() -> Dict[int, List[str]]:
 # ---------------- WEEKLY CONFIRMATION FLOW & DISTRIBUTION ----------------
 async def send_weekly_confirmation():
     week = get_week_start()
-    c = conn.cursor()
+    c = get_cursor()
     c.execute("SELECT MAX(added_at) AS last_promos FROM promocodes")
     last_promos = c.fetchone()["last_promos"] or "—"
     last_list = "последние обновления: см. /setusers"
@@ -1261,7 +1257,7 @@ async def cb_weekly_plan(callback: types.CallbackQuery):
     if not plan:
         await callback.answer("Невозможно построить план (недостаточно промокодов/пустой список).")
         return
-    c = conn.cursor()
+    c = get_cursor()
     week = get_week_start()
     if USE_POSTGRES:
         c.execute("SELECT position, site_username, user_id FROM weekly_users WHERE week_start = %s ORDER BY position", (week,))
@@ -1368,7 +1364,7 @@ async def weekly_distribution_job():
     if not plan:
         db_set_setting("weekly_confirmed", "0")
         return
-    c = conn.cursor()
+    c = get_cursor()
     c.execute("SELECT id, code, total_uses, used FROM promocodes ORDER BY added_at ASC, id ASC")
     promos = c.fetchall()
     rem_map = {p["code"]:(p["id"], p["total_uses"] - p["used"]) for p in promos}
@@ -1431,7 +1427,7 @@ async def cb_manual_plan(callback: types.CallbackQuery):
         return
     out = ["📊 План распределения (ручная раздача):"]
     idx = 1
-    c = conn.cursor()
+    c = get_cursor()
     week = get_week_start()
     if USE_POSTGRES:
         c.execute("SELECT position, site_username, user_id FROM weekly_users WHERE week_start = %s ORDER BY position", (week,))
@@ -1471,7 +1467,7 @@ async def cb_manual_confirm(callback: types.CallbackQuery):
         return
     await callback.message.edit_text("Запускаю ручную раздачу...")
     await asyncio.sleep(0.5)
-    c = conn.cursor()
+    c = get_cursor()
     c.execute("SELECT id, code, total_uses, used FROM promocodes ORDER BY added_at ASC, id ASC")
     promos = c.fetchall()
     rem_map = {p["code"]:(p["id"], p["total_uses"] - p["used"]) for p in promos}
@@ -1536,7 +1532,7 @@ async def cb_report_plan(callback: types.CallbackQuery):
         await callback.answer("План недоступен (пусто).")
         return
     out = ["📊 План раздачи:\n"]
-    c = conn.cursor()
+    c = get_cursor()
     week = get_week_start()
     if USE_POSTGRES:
         c.execute("SELECT position, site_username, user_id FROM weekly_users WHERE week_start = %s ORDER BY position", (week,))
@@ -1571,7 +1567,7 @@ async def cb_report_results(callback: types.CallbackQuery):
         await callback.answer("Нет прав")
         return
     week = get_week_start()
-    c = conn.cursor()
+    c = get_cursor()
     if USE_POSTGRES:
         c.execute("""
             SELECT d.given_at, COALESCE(u.site_username,'-') AS site, COALESCE(u.tg_username,'-') AS tg, d.code, d.source
