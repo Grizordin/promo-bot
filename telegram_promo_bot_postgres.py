@@ -14,12 +14,6 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-try:
-    from aiogram.enums import AllowedUpdates
-    allowed_updates = AllowedUpdates.all()
-except ImportError:
-    from aiogram.types import AllowedUpdates
-    allowed_updates = AllowedUpdates.ALL
 
 # ---------------- CONFIG ----------------
 # Token: keep fallback to original value so local usage doesn't break; you can set BOT_TOKEN in env on Render
@@ -1645,11 +1639,11 @@ async def set_commands():
             pass
 
 # ---------------- RUN ----------------
+import asyncio
+
 async def main():
-    # запускаем планировщик задач
     scheduler.start()
-    # запускаем бота
-    await dp.start_polling(bot, allowed_updates=allowed_updates)
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
     try:
