@@ -13,6 +13,7 @@ from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
+from aiogram.enums import AllowedUpdates
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # ---------------- CONFIG ----------------
@@ -1643,7 +1644,7 @@ async def main():
     # запускаем планировщик
     scheduler.start()
     # запускаем polling aiogram
-    await dp.start_polling(bot, allowed_updates=types.AllowedUpdates.ALL)
+    await dp.start_polling(bot, allowed_updates=AllowedUpdates.all())
 
 if __name__ == "__main__":
     try:
