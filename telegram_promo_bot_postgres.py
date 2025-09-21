@@ -64,7 +64,6 @@ if DATABASE_URL:
         return CursorWrapper(real_cur)
 
     # override connection.cursor to return our wrapper (so existing code calling conn.cursor() works)
-    conn.cursor = _pg_cursor
 
     # create tables for Postgres (SERIAL, BIGINT, etc.)
     c = get_cursor()
