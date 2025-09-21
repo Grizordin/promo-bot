@@ -1640,14 +1640,16 @@ async def set_commands():
 
 # ---------------- RUN ----------------
 async def main():
-    loop = asyncio.get_running_loop()
-    scheduler.configure(event_loop=loop)
+    # запускаем планировщик
     scheduler.start()
-    await set_commands()
-    await dp.start_polling(bot)
+    # запускаем polling aiogram
+    await dp.start_polling(bot, allowed_updates=types.AllowedUpdates.ALL)
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    except KeyboardInterrupt:
-        print("Бот остановлен вручную")
+    finally:
+        try:
+            asyncio.run(bot.session.close())
+        except:
+            pass
