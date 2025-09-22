@@ -964,9 +964,6 @@ async def givepromo_codes_entered(message: Message, state: FSMContext):
             c.execute("INSERT INTO distribution (user_id, promo_id, code, count, source, given_at) VALUES (?, ?, ?, ?, ?, ?)", (tg_id, pid, code, 1, give_type, now))
             c.execute("UPDATE promocodes SET used = used + 1 WHERE id = ?", (pid,))
         issued_codes.append(code)
-    if give_type == "reserve":
-        set_reserve(max(0, get_reserve() - len(issued_codes)))
-    conn.commit()
     # notify user
     try:
         header = "Привет, твой промокод за недельный топ 🎉🎉🎉\n1.5к камней\n\n"
@@ -975,7 +972,7 @@ async def givepromo_codes_entered(message: Message, state: FSMContext):
         await bot.send_message(tg_id, header + "\n".join(promo_lines) + footer)
     except:
         pass
-    await message.answer("✅ Выдано пользователю:\n" + "\n".join([f"<code>{esc(c)}</code>" for c in issued_codes]) + f"\n\n📦 Резерв: <code>{esc(get_reserve())}</code>")
+    await message.answer("✅ Выдано пользователю:\n" + "\n".join([f"<code>{esc(c)}</code>" for c in issued_codes]))
     await state.clear()
 
 # ---------------- FINDUSER ----------------
@@ -1121,8 +1118,7 @@ def compute_allocation_ordered() -> Dict[int, List[str]]:
         """)
     promos = c.fetchall()
     total_available = sum(max(0, p["total_uses"] - p["used"]) for p in promos)
-    reserve = get_reserve()
-    distributable = total_available - reserve
+    distributable = total_available
     if distributable <= 0:
         return {}
     allocated = [0] * n
