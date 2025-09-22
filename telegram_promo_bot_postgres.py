@@ -1102,6 +1102,17 @@ async def cb_promostats_show(callback: types.CallbackQuery):
 def compute_allocation_ordered() -> Dict[int, List[str]]:
     c = get_cursor()
     week = get_week_start()
+
+    # достаём список пользователей недели
+    if USE_POSTGRES:
+        c.execute("SELECT position, user_id FROM weekly_users WHERE week_start = %s ORDER BY position", (week,))
+    else:
+        c.execute("SELECT position, user_id FROM weekly_users WHERE week_start = ? ORDER BY position", (week,))
+    weekly_rows = c.fetchall()
+    ordered = [r["user_id"] for r in weekly_rows]
+    n = len(ordered)
+
+    # берём только последние загруженные промо
     if USE_POSTGRES:
         c.execute("""
             SELECT id, code, total_uses, used, added_at
@@ -1117,25 +1128,28 @@ def compute_allocation_ordered() -> Dict[int, List[str]]:
             ORDER BY id ASC
         """)
     promos = c.fetchall()
+
     total_available = sum(max(0, p["total_uses"] - p["used"]) for p in promos)
     distributable = total_available
-    if distributable <= 0:
+    if distributable <= 0 or n == 0:
         return {}
+
+    # распределяем количество кодов по пользователям
     allocated = [0] * n
-    # give first 15 up to 3
+    # первые 15 мест — максимум по 3
     for i in range(min(15, n)):
         if ordered[i]:
             give = min(3, distributable)
             allocated[i] += give
             distributable -= give
-    # then others get at least 1 until distributed
+    # остальные получают хотя бы по 1
     for i in range(15, n):
         if distributable <= 0:
             break
         if ordered[i]:
             allocated[i] += 1
             distributable -= 1
-    # if anything left, distribute round-robin among eligible
+    # остатки раскидываем по кругу
     if distributable > 0:
         eligible = [i for i in range(15, n) if ordered[i]] or [i for i in range(n) if ordered[i]]
         idx = 0
@@ -1144,18 +1158,22 @@ def compute_allocation_ordered() -> Dict[int, List[str]]:
             allocated[i] += 1
             distributable -= 1
             idx += 1
-    promo_iter = [{"id": p["id"], "code": p["code"], "remaining": p["total_uses"] - p["used"]} for p in promos if (p["total_uses"] - p["used"]) > 0]
+
+    # создаём список доступных промо
+    promo_iter = [{"id": p["id"], "code": p["code"], "remaining": p["total_uses"] - p["used"]}
+                  for p in promos if (p["total_uses"] - p["used"]) > 0]
     if not promo_iter:
         return {}
 
-    distribution_plan = {}
+    # план распределения
+    distribution_plan: Dict[int, List[str]] = {}
     promo_idx = 0
     for pos_idx, cnt in enumerate(allocated):
         tg_id = ordered[pos_idx]
         if not tg_id or cnt <= 0:
             continue
         codes_given = []
-        used_codes_for_user = set()  # ensure unique codes per user in this allocation
+        used_codes_for_user = set()
         for _ in range(cnt):
             found = False
             for offset in range(len(promo_iter)):
