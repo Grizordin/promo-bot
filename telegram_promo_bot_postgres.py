@@ -864,7 +864,7 @@ async def givepromo_site_entered(message: Message, state: FSMContext):
             text_lines.append(f"<code>{esc(code)}</code>")
     else:
         text_lines.append("Доступных уникальных промо нет.")
-     kb = InlineKeyboardMarkup(inline_keyboard=[
+    kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🟢 Выдать", callback_data=f"give_type:free:{tg_id}:{esc(site)}")]
     ])
     await message.answer("\n".join(text_lines), reply_markup=kb)
