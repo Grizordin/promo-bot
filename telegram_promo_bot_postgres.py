@@ -25,7 +25,6 @@ try:
 except ValueError:
     ADMIN_IDS = []
 MOSCOW_TZ = pytz.timezone("Europe/Moscow")
-RESERVE_DEFAULT = 0  # default reserve if not set
 
 # ---------------- DB SETUP (Postgres if DATABASE_URL present, otherwise fallback to SQLite) ----------------
 USE_POSTGRES = False
@@ -118,7 +117,6 @@ if DATABASE_URL:
     conn.commit()
 
     # default settings initialization (Postgres style)
-    c.execute("INSERT INTO settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING", ("reserve", str(RESERVE_DEFAULT)))
     c.execute("INSERT INTO settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING", ("weekly_confirmed", "0"))
     c.execute("INSERT INTO settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING", ("last_distribution_date", ""))
     conn.commit()
@@ -187,7 +185,6 @@ else:
     conn.commit()
 
     # default settings initialization (sqlite style)
-    cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", ("reserve", str(RESERVE_DEFAULT)))
     cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", ("weekly_confirmed", "0"))
     cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", ("last_distribution_date", ""))
     conn.commit()
@@ -221,15 +218,6 @@ def db_set_setting(key: str, value: str):
         # sqlite: REPLACE INTO will insert or replace existing row
         c.execute("REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
     conn.commit()
-
-def get_reserve() -> int:
-    try:
-        return int(db_get_setting("reserve"))
-    except:
-        return RESERVE_DEFAULT
-
-def set_reserve(val: int):
-    db_set_setting("reserve", str(val))
 
 def now_msk() -> datetime:
     return datetime.now(MOSCOW_TZ)
@@ -288,7 +276,6 @@ class AddPromoState(StatesGroup):
     waiting_for_code2 = State()
     waiting_for_code3 = State()
     waiting_for_uses = State()
-    waiting_for_reserve = State()
 
 class SetUsersState(StatesGroup):
     waiting_for_file = State()
@@ -505,7 +492,7 @@ async def cb_reject(callback: types.CallbackQuery):
         pass
     await callback.answer("Отклонён")
 
-# ---------------- ADD PROMO (3 promo + uses + reserve) ----------------
+# ---------------- ADD PROMO (3 promo + uses) ----------------
 @dp.message(Command("addpromo"))
 async def cmd_addpromo_start(message: Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
@@ -542,31 +529,15 @@ async def addpromo_uses(message: Message, state: FSMContext):
         await message.answer("Введите положительное целое число.")
         return
     await state.update_data(uses=uses)
-    await message.answer("Сколько из этих использований положить в резерв? (целое число, 0..uses)")
-    await state.set_state(AddPromoState.waiting_for_reserve)
 
-@dp.message(AddPromoState.waiting_for_reserve)
-async def addpromo_reserve(message: Message, state: FSMContext):
-    try:
-        reserve_put = int(message.text.strip())
-        data = await state.get_data()
-        uses = int(data.get("uses", 0))
-        if reserve_put < 0 or reserve_put > uses:
-            raise ValueError()
-    except:
-        await message.answer("Введите корректное число (0 .. общее количество использований).")
-        return
     data = await state.get_data()
     codes = [data.get("code1"), data.get("code2"), data.get("code3")]
     uses = int(data.get("uses"))
     add_promocodes(codes, uses)
-    # increase reserve by reserve_put
-    set_reserve(get_reserve() + reserve_put)
     lines = ["✅ Промокоды добавлены:"]
     for i, ccode in enumerate(codes, start=1):
         lines.append(f"{i}. <code>{esc(ccode)}</code>")
     lines.append(f"Всего использований: <code>{esc(uses)}</code>")
-    lines.append(f"В резерв отправлено: <code>{esc(reserve_put)}</code>")
     await message.answer("\n".join(lines))
     await state.clear()
     # show promostats
@@ -893,9 +864,8 @@ async def givepromo_site_entered(message: Message, state: FSMContext):
             text_lines.append(f"<code>{esc(code)}</code>")
     else:
         text_lines.append("Доступных уникальных промо нет.")
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🟢 Выдать из резерва", callback_data=f"give_type:reserve:{tg_id}:{esc(site)}")],
-        [InlineKeyboardButton(text="🔵 Выдать свободные", callback_data=f"give_type:free:{tg_id}:{esc(site)}")]
+     kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🟢 Выдать", callback_data=f"give_type:free:{tg_id}:{esc(site)}")]
     ])
     await message.answer("\n".join(text_lines), reply_markup=kb)
     await state.update_data(site=site, tg_id=tg_id)
@@ -907,12 +877,12 @@ async def cb_give_type(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer("Нет прав")
         return
     parts = callback.data.split(":")
-    if len(parts) < 4:
+    if len(parts) < 3:
         await callback.answer()
         return
-    give_type = parts[1]
+    give_type = parts[1]  # ожидаем 'free'
     tg_id = int(parts[2])
-    await callback.message.edit_text(f"Вы выбрали: {'резерв' if give_type=='reserve' else 'свободные'} для tg_id={tg_id}. Введите сколько промо выдать (1-3):")
+    await callback.message.edit_text(f"Вы выбрали: выдавать промо пользователю tg_id={tg_id}. Введите сколько промо выдать (1-3):")
     await state.update_data(give_type=give_type, give_tg_id=tg_id)
     await state.set_state(GivePromoState.waiting_for_qty)
     await callback.answer()
@@ -1090,34 +1060,65 @@ async def cmd_promostats(message: Message):
     if message.from_user.id not in ADMIN_IDS:
         return
     c = get_cursor()
-    c.execute("SELECT id, code, total_uses, used, added_at FROM promocodes ORDER BY added_at ASC, id ASC")
+    # distinct added_at values
+    if USE_POSTGRES:
+        c.execute("SELECT DISTINCT added_at FROM promocodes ORDER BY added_at DESC LIMIT 50")
+    else:
+        c.execute("SELECT DISTINCT added_at FROM promocodes ORDER BY added_at DESC LIMIT 50")
     rows = c.fetchall()
     if not rows:
         await message.answer("Промокоды не добавлены.")
         return
-    lines = ["📊 <b>Статистика промокодов</b>\n"]
+    buttons = []
+    for r in rows:
+        ts = r["added_at"]
+        ts_str = ts if isinstance(ts, str) else ts.strftime("%Y-%m-%d %H:%M:%S")
+        buttons.append([InlineKeyboardButton(text=f"📅 {ts_str}", callback_data=f"promostats:{ts_str}")])
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await message.answer("Выберите загрузку промо для просмотра статистики:", reply_markup=kb)
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("promostats:"))
+async def cb_promostats_show(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет прав")
+        return
+    ts_str = callback.data.split(":",1)[1]
+    c = get_cursor()
+    if USE_POSTGRES:
+        c.execute("SELECT id, code, total_uses, used FROM promocodes WHERE added_at = %s ORDER BY id ASC", (ts_str,))
+    else:
+        c.execute("SELECT id, code, total_uses, used FROM promocodes WHERE added_at = ? ORDER BY id ASC", (ts_str,))
+    rows = c.fetchall()
+    if not rows:
+        await callback.message.answer("Промокоды для этой загрузки не найдены.")
+        await callback.answer()
+        return
+    lines = [f"📊 Статистика промо (загрузка {ts_str}):\n"]
     for r in rows:
         left = r["total_uses"] - r["used"]
         status_emoji = "🟢" if left > 0 else "🔴"
         lines.append(f"{status_emoji} <code>{esc(r['code'])}</code> — осталось: <code>{esc(left)}</code> / всего: <code>{esc(r['total_uses'])}</code>")
-    lines.append("───────────────")
-    lines.append(f"📦 Резерв: <code>{esc(get_reserve())}</code>")
-    await message.answer("\n".join(lines))
+    await callback.message.answer("\n".join(lines))
+    await callback.answer()
 
 # ---------------- DISTRIBUTION ALGORITHM (same approach as earlier) ----------------
 def compute_allocation_ordered() -> Dict[int, List[str]]:
     c = get_cursor()
     week = get_week_start()
     if USE_POSTGRES:
-        c.execute("SELECT position, site_username, user_id FROM weekly_users WHERE week_start = %s ORDER BY position", (week,))
+        c.execute("""
+            SELECT id, code, total_uses, used, added_at
+            FROM promocodes
+            WHERE added_at = (SELECT MAX(added_at) FROM promocodes)
+            ORDER BY id ASC
+        """)
     else:
-        c.execute("SELECT position, site_username, user_id FROM weekly_users WHERE week_start = ? ORDER BY position", (week,))
-    positions = c.fetchall()
-    if not positions:
-        return {}
-    ordered = [r["user_id"] for r in positions]
-    n = len(ordered)
-    c.execute("SELECT id, code, total_uses, used, added_at FROM promocodes ORDER BY added_at ASC, id ASC")
+        c.execute("""
+            SELECT id, code, total_uses, used, added_at
+            FROM promocodes
+            WHERE added_at = (SELECT MAX(added_at) FROM promocodes)
+            ORDER BY id ASC
+        """)
     promos = c.fetchall()
     total_available = sum(max(0, p["total_uses"] - p["used"]) for p in promos)
     reserve = get_reserve()
@@ -1400,21 +1401,28 @@ async def weekly_distribution_job():
     except:
         pass
 
-# schedule weekly confirmation and distribution
-scheduler.add_job(send_weekly_confirmation, "cron", day_of_week="sun", hour=21, minute=7)
-scheduler.add_job(weekly_distribution_job, "cron", day_of_week="sun", hour=21, minute=8)
-
 # ---------------- MANUAL DISTRIBUTE (/distribute_now) ----------------
 @dp.message(Command("distribute_now"))
 async def cmd_distribute_now(message: Message):
     if message.from_user.id not in ADMIN_IDS:
         return
+    c = get_cursor()
+    c.execute("SELECT MAX(week_start) AS last_list FROM weekly_users")
+    last_list_row = c.fetchone()
+    last_list = last_list_row["last_list"] if last_list_row else None
+    c.execute("SELECT MAX(added_at) AS last_promos FROM promocodes")
+    last_promos_row = c.fetchone()
+    last_promos = last_promos_row["last_promos"] if last_promos_row else None
+
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Показать план", callback_data="manual_plan")],
         [InlineKeyboardButton(text="✅ Подтвердить немедленно", callback_data="manual_confirm")],
         [InlineKeyboardButton(text="❌ Отмена", callback_data="manual_cancel")]
     ])
-    await message.answer("⚠️ Подтвердите немедленную раздачу (без ожидания 21:07). Сначала проверьте план.", reply_markup=kb)
+    info = "⚠️ Подтвердите немедленную раздачу (без ожидания 21:07). Сначала проверьте план.\n\n"
+    info += f"📋 Последний список: {last_list}\n"
+    info += f"📦 Последние промо (added_at): {last_promos}\n\n"
+    await message.answer(info, reply_markup=kb)
 
 @dp.callback_query(lambda c: c.data == "manual_plan")
 async def cb_manual_plan(callback: types.CallbackQuery):
@@ -1566,46 +1574,63 @@ async def cb_report_results(callback: types.CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         await callback.answer("Нет прав")
         return
-    week = get_week_start()
+    c = get_cursor()
+    # выбираем уникальные даты выдач (date part)
+    if USE_POSTGRES:
+        c.execute("SELECT DISTINCT DATE(given_at) AS d FROM distribution ORDER BY d DESC LIMIT 50")
+    else:
+        c.execute("SELECT DISTINCT DATE(given_at) AS d FROM distribution ORDER BY d DESC LIMIT 50")
+    rows = c.fetchall()
+    if not rows:
+        await callback.message.answer("Выдач ещё не было.")
+        await callback.answer()
+        return
+    buttons = []
+    for r in rows:
+        d = r["d"]
+        buttons.append([InlineKeyboardButton(text=f"🗓 {d}", callback_data=f"report_results_show:{d}")])
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await callback.message.answer("Выберите дату (день) выдач для показа итогов:", reply_markup=kb)
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("report_results_show:"))
+async def cb_report_results_show(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет прав")
+        return
+    d = callback.data.split(":",1)[1]
     c = get_cursor()
     if USE_POSTGRES:
         c.execute("""
             SELECT d.given_at, COALESCE(u.site_username,'-') AS site, COALESCE(u.tg_username,'-') AS tg, d.code, d.source
             FROM distribution d
             LEFT JOIN users u ON u.tg_id = d.user_id
-            WHERE d.given_at >= %s
+            WHERE DATE(d.given_at) = %s
             ORDER BY d.given_at DESC
-        """, (week + " 00:00",))
+        """, (d,))
     else:
         c.execute("""
             SELECT d.given_at, COALESCE(u.site_username,'-') AS site, COALESCE(u.tg_username,'-') AS tg, d.code, d.source
             FROM distribution d
             LEFT JOIN users u ON u.tg_id = d.user_id
-            WHERE d.given_at >= ?
+            WHERE DATE(d.given_at) = ?
             ORDER BY d.given_at DESC
-        """, (week + " 00:00",))
+        """, (d,))
     rows = c.fetchall()
     if not rows:
-        await callback.message.answer("За эту неделю выдач ещё не было.")
+        await callback.message.answer("За выбранную дату выдач не найдено.")
         await callback.answer()
         return
-    parts = ["📝 Итоги раздачи за текущую неделю:\n"]
+    parts = [f"📝 Итоги раздачи за {d}:\n"]
     grouped = {}
     for r in rows:
         key = (r["site"], r["tg"])
         grouped.setdefault(key, []).append((r["given_at"], r["code"], r["source"]))
     for (site, tg), items in grouped.items():
-        parts.append(f"👤 {esc(site)} | @{esc(tg)}")
+        parts.append(f"👤 {site} / {tg}:")
         for it in items:
-            parts.append(f"   ├─ <code>{esc(it[1])}</code> | {esc(it[2])} | <code>{esc(it[0])}</code>")
+            parts.append(f"   • {it[0]} — <code>{esc(it[1])}</code> ({esc(it[2])})")
         parts.append("───────────────")
-    c.execute("SELECT id, code, total_uses, used FROM promocodes ORDER BY added_at ASC, id ASC")
-    promos = c.fetchall()
-    parts.append("\n📦 Остатки промокодов:")
-    for p in promos:
-        left = p["total_uses"] - p["used"]
-        parts.append(f"🎟️ <code>{esc(p['code'])}</code> — осталось: <code>{esc(left)}</code> / всего: <code>{esc(p['total_uses'])}</code>")
-    parts.append(f"\n📦 Резерв: <code>{esc(get_reserve())}</code>")
     await callback.message.answer("\n".join(parts))
     await callback.answer()
 
