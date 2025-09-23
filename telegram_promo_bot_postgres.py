@@ -647,7 +647,7 @@ async def cmd_missing(message: Message):
     week = get_week_start()
     c = get_cursor()
     if USE_POSTGRES:
-        c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = %s AND (user_id IS NULL OR user_id = '') ORDER BY position", (week,))
+        c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = %s AND user_id IS NULL ORDER BY position", (week,))
     else:
         c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = ? AND (user_id IS NULL OR user_id = '') ORDER BY position", (week,))
     rows = c.fetchall()
@@ -736,7 +736,7 @@ async def cmd_assign_start(message: Message, state: FSMContext):
     week = get_week_start()
     c = get_cursor()
     if USE_POSTGRES:
-        c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = %s AND (user_id IS NULL OR user_id = '') ORDER BY position", (week,))
+        c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = %s AND (user_id IS NULL) ORDER BY position", (week,))
     else:
         c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = ? AND (user_id IS NULL OR user_id = '') ORDER BY position", (week,))
     rows = c.fetchall()
@@ -1051,7 +1051,7 @@ async def cb_find_assign(callback: types.CallbackQuery):
     week = get_week_start()
     c = get_cursor()
     if USE_POSTGRES:
-        c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = %s AND (user_id IS NULL OR user_id = '') ORDER BY position", (week,))
+        c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = %s AND (user_id IS NULL) ORDER BY position", (week,))
     else:
         c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = ? AND (user_id IS NULL OR user_id = '') ORDER BY position", (week,))
     rows = c.fetchall()
