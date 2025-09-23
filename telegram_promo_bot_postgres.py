@@ -773,6 +773,7 @@ async def assign_got_pos(message: Message, state: FSMContext):
         await state.clear()
         return
     # list available users to choose
+    week = get_week_start()
     c = get_cursor()
     if USE_POSTGRES:
         c.execute("""
@@ -1543,6 +1544,7 @@ async def weekly_distribution_job():
 async def cmd_distribute_now(message: Message):
     if message.from_user.id not in ADMIN_IDS:
         return
+    week = get_week_start()
     c = get_cursor()
     c.execute("SELECT MAX(week_start) AS last_list FROM weekly_users")
     last_list_row = c.fetchone()
@@ -1612,6 +1614,7 @@ async def cb_manual_confirm(callback: types.CallbackQuery):
         return
     await callback.message.edit_text("Запускаю ручную раздачу...")
     await asyncio.sleep(0.5)
+    week = get_week_start()
     c = get_cursor()
     c.execute("SELECT id, code, total_uses, used FROM promocodes ORDER BY added_at ASC, id ASC")
     promos = c.fetchall()
