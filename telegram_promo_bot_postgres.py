@@ -43,21 +43,36 @@ if DATABASE_URL:
     # Keep raw cursor factory for creating RealDictCursor when needed
     raw_pg_cursor = conn.cursor
 
+
     def get_cursor():
         real_cur = raw_pg_cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         class CursorWrapper:
             def __init__(self, rc):
                 self._rc = rc
             def execute(self, query, params=None):
-                if params is not None and "?" in query:
-                    q = query.replace("?", "%s")
-                    return self._rc.execute(q, params)
-                return self._rc.execute(query, params) if params is not None else self._rc.execute(query)
+                try:
+                    if params is not None and "?" in query:
+                        q = query.replace("?", "%s")
+                        return self._rc.execute(q, params)
+                    return self._rc.execute(query, params) if params is not None else self._rc.execute(query)
+                except Exception:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    raise
             def executemany(self, query, seq_of_params):
-                if "?" in query:
-                    q = query.replace("?", "%s")
-                    return self._rc.executemany(q, seq_of_params)
-                return self._rc.executemany(query, seq_of_params)
+                try:
+                    if "?" in query:
+                        q = query.replace("?", "%s")
+                        return self._rc.executemany(q, seq_of_params)
+                    return self._rc.executemany(query, seq_of_params)
+                except Exception:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    raise
             def fetchone(self): return self._rc.fetchone()
             def fetchall(self): return self._rc.fetchall()
             def __getattr__(self, name): return getattr(self._rc, name)
@@ -707,7 +722,7 @@ async def cb_users_free(callback: types.CallbackQuery):
         return
     out = ["👥 Свободные зарегистрированные (не в недельном списке):\n"]
     for r in rows:
-        out.append(f"👤 site: {esc(r['site_username'] or '-')}")
+        out.append(f"👤 site: <code>{esc(r['site_username'] or '-')}</code>")
         out.append(f"🆔 id: <code>{esc(r['tg_id'])}</code>")
         out.append(f"🔗 <a href=\"tg://user?id={esc(r['tg_id'])}\">@{esc(r['tg_username'] or r['tg_id'])}</a>")
         out.append("───────────────")
@@ -1095,107 +1110,195 @@ async def cb_promostats_show(callback: types.CallbackQuery):
         left = r["total_uses"] - r["used"]
         status_emoji = "🟢" if left > 0 else "🔴"
         lines.append(f"{status_emoji} <code>{esc(r['code'])}</code> — осталось: <code>{esc(left)}</code> / всего: <code>{esc(r['total_uses'])}</code>")
-    await callback.message.answer("\n".join(lines))
+    kb_del = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🗑 Удалить эту загрузку", callback_data=f"promostats_delete:{ts_str}")],
+        [InlineKeyboardButton(text="Отмена", callback_data="noop")]
+    ])
+    await callback.message.answer("\n".join(lines), reply_markup=kb_del)
+    await callback.answer()
+@dp.callback_query(lambda c: c.data and c.data.startswith("promostats_delete:"))
+async def cb_promostats_delete(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет прав")
+        return
+    ts_str = callback.data.split(":",1)[1]
+    kb_confirm = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"promostats_delete_confirm:{ts_str}")],
+        [InlineKeyboardButton(text="❌ Нет", callback_data="noop")]
+    ])
+    await callback.message.answer(f"Вы уверены, что хотите удалить все промокоды, загруженные {ts_str}? Это удалит строки из таблицы promocodes для этой даты.", reply_markup=kb_confirm)
     await callback.answer()
 
+@dp.callback_query(lambda c: c.data and c.data.startswith("promostats_delete_confirm:"))
+async def cb_promostats_delete_confirm(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет прав")
+        return
+    ts_str = callback.data.split(":",1)[1]
+    c = get_cursor()
+    try:
+        if USE_POSTGRES:
+            c.execute("DELETE FROM promocodes WHERE added_at = %s", (ts_str,))
+        else:
+            c.execute("DELETE FROM promocodes WHERE added_at = ?", (ts_str,))
+        conn.commit()
+        await callback.message.answer(f"Удаление промокодов, загруженных {ts_str}, выполнено.")
+    except Exception as exc:
+        if USE_POSTGRES:
+            conn.rollback()
+        await callback.message.answer(f"Ошибка при удалении: {exc}")
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data == "noop")
+async def cb_noop(callback: types.CallbackQuery):
+    try:
+        await callback.answer()
+    except:
+        pass
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("report_delete:"))
+async def cb_report_delete(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет прав")
+        return
+    d = callback.data.split(":",1)[1]
+    kb_confirm = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"report_delete_confirm:{d}")],
+        [InlineKeyboardButton(text="❌ Нет", callback_data="noop")]
+    ])
+    await callback.message.answer(f"Вы уверены, что хотите удалить все записи выдачи за {d}? Это удалит строки из таблицы distribution за эту дату.", reply_markup=kb_confirm)
+    await callback.answer()
+
+@dp.callback_query(lambda c: c.data and c.data.startswith("report_delete_confirm:"))
+async def cb_report_delete_confirm(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет прав")
+        return
+    d = callback.data.split(":",1)[1]
+    c = get_cursor()
+    try:
+        if USE_POSTGRES:
+            c.execute("DELETE FROM distribution WHERE DATE(given_at) = %s", (d,))
+        else:
+            c.execute("DELETE FROM distribution WHERE DATE(given_at) = ?", (d,))
+        conn.commit()
+        await callback.message.answer(f"Удаление записей выдач за {d} выполнено.")
+    except Exception as exc:
+        if USE_POSTGRES:
+            conn.rollback()
+        await callback.message.answer(f"Ошибка при удалении: {exc}")
+    await callback.answer()
+
+    try:
+        await callback.answer()
+    except:
+        pass
+
 # ---------------- DISTRIBUTION ALGORITHM (same approach as earlier) ----------------
+
 def compute_allocation_ordered() -> Dict[int, List[str]]:
+    """
+    Возвращает распределение по позициям weekly_users:
+    { position_number (from weekly_users.position): [code1, code2, ...] }
+    Распределение считается по числу позиций в weekly_users для текущей недели.
+    """
     c = get_cursor()
     week = get_week_start()
 
-    # достаём список пользователей недели
+    # 1) получаем список позиций (ordered by position)
     if USE_POSTGRES:
         c.execute("SELECT position, user_id FROM weekly_users WHERE week_start = %s ORDER BY position", (week,))
     else:
         c.execute("SELECT position, user_id FROM weekly_users WHERE week_start = ? ORDER BY position", (week,))
-    weekly_rows = c.fetchall()
-    ordered = [r["user_id"] for r in weekly_rows]
-    n = len(ordered)
+    positions = c.fetchall()
+    if not positions:
+        return {}
 
-    # берём только последние загруженные промо
+    n_positions = len(positions)
+
+    # 2) берем только последние загруженные промо
     if USE_POSTGRES:
         c.execute("""
-            SELECT id, code, total_uses, used, added_at
+            SELECT id, code, total_uses, used
             FROM promocodes
             WHERE added_at = (SELECT MAX(added_at) FROM promocodes)
             ORDER BY id ASC
         """)
     else:
         c.execute("""
-            SELECT id, code, total_uses, used, added_at
+            SELECT id, code, total_uses, used
             FROM promocodes
             WHERE added_at = (SELECT MAX(added_at) FROM promocodes)
             ORDER BY id ASC
         """)
     promos = c.fetchall()
-
-    total_available = sum(max(0, p["total_uses"] - p["used"]) for p in promos)
-    distributable = total_available
-    if distributable <= 0 or n == 0:
-        return {}
-
-    # распределяем количество кодов по пользователям
-    allocated = [0] * n
-    # первые 15 мест — максимум по 3
-    for i in range(min(15, n)):
-        if ordered[i]:
-            give = min(3, distributable)
-            allocated[i] += give
-            distributable -= give
-    # остальные получают хотя бы по 1
-    for i in range(15, n):
-        if distributable <= 0:
-            break
-        if ordered[i]:
-            allocated[i] += 1
-            distributable -= 1
-    # остатки раскидываем по кругу
-    if distributable > 0:
-        eligible = [i for i in range(15, n) if ordered[i]] or [i for i in range(n) if ordered[i]]
-        idx = 0
-        while distributable > 0 and eligible:
-            i = eligible[idx % len(eligible)]
-            allocated[i] += 1
-            distributable -= 1
-            idx += 1
-
-    # создаём список доступных промо
-    promo_iter = [{"id": p["id"], "code": p["code"], "remaining": p["total_uses"] - p["used"]}
-                  for p in promos if (p["total_uses"] - p["used"]) > 0]
+    promo_iter = [{"id": p["id"], "code": p["code"], "remaining": max(0, p["total_uses"] - p["used"])} for p in promos if (p["total_uses"] - p["used"]) > 0]
     if not promo_iter:
         return {}
 
-    # план распределения
-    distribution_plan: Dict[int, List[str]] = {}
+    total_available = sum(p["remaining"] for p in promo_iter)
+    distributable = total_available
+    if distributable <= 0:
+        return {}
+
+    # 3) распределяем количество кодов по позициям
+    allocated = [0] * n_positions
+    # первые 15 позиций получают до 3
+    top_count = min(15, n_positions)
+    for i in range(top_count):
+        give = min(3, distributable)
+        allocated[i] += give
+        distributable -= give
+        if distributable <= 0:
+            break
+
+    # затем остальные получают по 1 пока есть
+    if distributable > 0:
+        for i in range(top_count, n_positions):
+            if distributable <= 0:
+                break
+            allocated[i] += 1
+            distributable -= 1
+
+    # остаток раздаем round-robin по всем позициям
+    if distributable > 0:
+        idx = 0
+        while distributable > 0 and n_positions > 0:
+            allocated[idx % n_positions] += 1
+            distributable -= 1
+            idx += 1
+
+    # 4) сопоставляем коды с позициями
+    distribution_plan_by_pos: Dict[int, List[str]] = {}
     promo_idx = 0
     for pos_idx, cnt in enumerate(allocated):
-        tg_id = ordered[pos_idx]
-        if not tg_id or cnt <= 0:
+        pos_number = positions[pos_idx]["position"]
+        if cnt <= 0:
             continue
-        codes_given = []
-        used_codes_for_user = set()
+        codes_for_pos = []
+        used_codes_local = set()
         for _ in range(cnt):
             found = False
             for offset in range(len(promo_iter)):
                 idx = (promo_idx + offset) % len(promo_iter)
                 if promo_iter[idx]["remaining"] <= 0:
                     continue
-                candidate = promo_iter[idx]["code"]
-                if candidate in used_codes_for_user:
+                cand = promo_iter[idx]["code"]
+                if cand in used_codes_local:
                     continue
-                if user_already_has_code(tg_id, candidate):
-                    continue
+                # Important: do NOT check user_already_has_code here (we allocate by positions)
                 promo_iter[idx]["remaining"] -= 1
-                codes_given.append(candidate)
-                used_codes_for_user.add(candidate)
+                codes_for_pos.append(cand)
+                used_codes_local.add(cand)
                 promo_idx = idx
                 found = True
                 break
             if not found:
                 break
-        if codes_given:
-            distribution_plan[tg_id] = distribution_plan.get(tg_id, []) + codes_given
-    return distribution_plan
+        if codes_for_pos:
+            distribution_plan_by_pos[pos_number] = codes_for_pos
+
+    return distribution_plan_by_pos
 
 # ---------------- WEEKLY CONFIRMATION FLOW & DISTRIBUTION ----------------
 async def send_weekly_confirmation():
@@ -1206,7 +1309,7 @@ async def send_weekly_confirmation():
     last_list = "последние обновления: см. /setusers"
     plan = compute_allocation_ordered()
     if not plan:
-        preview_text = "Предварительное распределение: невозможно — либо список пуст, либо недостаточно промокодов (после учёта резерва)."
+        preview_text = "Предварительное распределение: невозможно — либо список пуст, либо недостаточно промокодов."
     else:
         parts = []
         c2 = conn.cursor()
@@ -1217,7 +1320,7 @@ async def send_weekly_confirmation():
         positions = c2.fetchall()
         for pos in positions[:60]:
             uid = pos["user_id"]
-            parts.append(f"{pos['position']}: {pos['site_username']} -> {len(plan.get(uid, []))} промо")
+            parts.append(f"{pos['position']}: {pos['site_username']} -> {len(plan.get(pos['position'], []))} промо")
         preview_text = "\n".join(parts)
     planned_time = now_msk().replace(hour=21, minute=8, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
     msg_text = (
@@ -1288,7 +1391,7 @@ async def cb_weekly_plan(callback: types.CallbackQuery):
             out.append(f"{idx}. {esc(pos['site_username'])} — ❌ пусто")
             full_counts["none"] += 1
         else:
-            codes = plan.get(uid, [])
+            codes = plan.get(pos['position'], [])
             if not codes:
                 out.append(f"{idx}. {esc(pos['site_username'])} — ❌ не получит промо")
                 full_counts["none"] += 1
@@ -1384,7 +1487,17 @@ async def weekly_distribution_job():
     promos = c.fetchall()
     rem_map = {p["code"]:(p["id"], p["total_uses"] - p["used"]) for p in promos}
     now = now_msk().strftime("%Y-%m-%d %H:%M:%S")
-    for tg_id, codes in plan.items():
+
+    for pos_number, codes in plan.items():
+        # get user_id for this position
+        if USE_POSTGRES:
+            c.execute("SELECT user_id FROM weekly_users WHERE week_start = %s AND position = %s", (week, pos_number))
+        else:
+            c.execute("SELECT user_id FROM weekly_users WHERE week_start = ? AND position = ?", (week, pos_number))
+        row = c.fetchone()
+        if not row or not row.get("user_id"):
+            continue
+        tg_id = row["user_id"]
         issued = []
         for code in codes:
             pid, rem = rem_map.get(code, (None,0))
@@ -1392,13 +1505,23 @@ async def weekly_distribution_job():
                 continue
             if user_already_has_code(tg_id, code):
                 continue
-            if USE_POSTGRES:
-                c.execute("INSERT INTO distribution (user_id, promo_id, code, count, source, given_at) VALUES (%s, %s, %s, %s, %s, %s)", (tg_id, pid, code, 1, "normal", now))
-                c.execute("UPDATE promocodes SET used = used + 1 WHERE id = %s", (pid,))
-            else:
-                c.execute("INSERT INTO distribution (user_id, promo_id, code, count, source, given_at) VALUES (?, ?, ?, ?, ?, ?)", (tg_id, pid, code, 1, "normal", now))
-                c.execute("UPDATE promocodes SET used = used + 1 WHERE id = ?", (pid,))
-            issued.append(code)
+            try:
+                if USE_POSTGRES:
+                    c.execute("INSERT INTO distribution (user_id, promo_id, code, count, source, given_at) VALUES (%s, %s, %s, %s, %s, %s)", (tg_id, pid, code, 1, "normal", now))
+                    c.execute("UPDATE promocodes SET used = used + 1 WHERE id = %s", (pid,))
+                else:
+                    c.execute("INSERT INTO distribution (user_id, promo_id, code, count, source, given_at) VALUES (?, ?, ?, ?, ?, ?)", (tg_id, pid, code, 1, "normal", now))
+                    c.execute("UPDATE promocodes SET used = used + 1 WHERE id = ?", (pid,))
+                issued.append(code)
+                # decrement rem_map local tracker
+                rem_map[code] = (pid, rem_map.get(code, (pid,0))[1] - 1)
+            except Exception as exc:
+                try:
+                    if USE_POSTGRES:
+                        conn.rollback()
+                except:
+                    pass
+                continue
         if issued:
             try:
                 header = "Привет, твой промокод за недельный топ 🎉🎉🎉\n1.5к камней\n\n"
@@ -1461,7 +1584,7 @@ async def cb_manual_plan(callback: types.CallbackQuery):
         if not uid:
             out.append(f"{idx}. {esc(pos['site_username'])} — ❌ пусто")
         else:
-            codes = plan.get(uid, [])
+            codes = plan.get(pos['position'], [])
             if not codes:
                 out.append(f"{idx}. {esc(pos['site_username'])} — ❌ не получит промо")
             else:
@@ -1494,7 +1617,17 @@ async def cb_manual_confirm(callback: types.CallbackQuery):
     promos = c.fetchall()
     rem_map = {p["code"]:(p["id"], p["total_uses"] - p["used"]) for p in promos}
     now = now_msk().strftime("%Y-%m-%d %H:%M:%S")
-    for tg_id, codes in plan.items():
+
+    for pos_number, codes in plan.items():
+        # get user_id for this position
+        if USE_POSTGRES:
+            c.execute("SELECT user_id FROM weekly_users WHERE week_start = %s AND position = %s", (week, pos_number))
+        else:
+            c.execute("SELECT user_id FROM weekly_users WHERE week_start = ? AND position = ?", (week, pos_number))
+        row = c.fetchone()
+        if not row or not row.get("user_id"):
+            continue
+        tg_id = row["user_id"]
         issued = []
         for code in codes:
             pid, rem = rem_map.get(code, (None,0))
@@ -1502,13 +1635,22 @@ async def cb_manual_confirm(callback: types.CallbackQuery):
                 continue
             if user_already_has_code(tg_id, code):
                 continue
-            if USE_POSTGRES:
-                c.execute("INSERT INTO distribution (user_id, promo_id, code, count, source, given_at) VALUES (%s, %s, %s, %s, %s, %s)", (tg_id, pid, code, 1, "manual", now))
-                c.execute("UPDATE promocodes SET used = used + 1 WHERE id = %s", (pid,))
-            else:
-                c.execute("INSERT INTO distribution (user_id, promo_id, code, count, source, given_at) VALUES (?, ?, ?, ?, ?, ?)", (tg_id, pid, code, 1, "manual", now))
-                c.execute("UPDATE promocodes SET used = used + 1 WHERE id = ?", (pid,))
-            issued.append(code)
+            try:
+                if USE_POSTGRES:
+                    c.execute("INSERT INTO distribution (user_id, promo_id, code, count, source, given_at) VALUES (%s, %s, %s, %s, %s, %s)", (tg_id, pid, code, 1, "manual", now))
+                    c.execute("UPDATE promocodes SET used = used + 1 WHERE id = %s", (pid,))
+                else:
+                    c.execute("INSERT INTO distribution (user_id, promo_id, code, count, source, given_at) VALUES (?, ?, ?, ?, ?, ?)", (tg_id, pid, code, 1, "manual", now))
+                    c.execute("UPDATE promocodes SET used = used + 1 WHERE id = ?", (pid,))
+                issued.append(code)
+                rem_map[code] = (pid, rem_map.get(code, (pid,0))[1] - 1)
+            except Exception as exc:
+                try:
+                    if USE_POSTGRES:
+                        conn.rollback()
+                except:
+                    pass
+                continue
         if issued:
             try:
                 header = "Привет, твой промокод за недельный топ 🎉🎉🎉\n1.5к камней\n\n"
@@ -1567,7 +1709,7 @@ async def cb_report_plan(callback: types.CallbackQuery):
         if not uid:
             out.append(f"{idx}. {esc(pos['site_username'])} — ❌ пусто")
         else:
-            codes = plan.get(uid, [])
+            codes = plan.get(pos['position'], [])
             if not codes:
                 out.append(f"{idx}. {esc(pos['site_username'])} — ❌ не получит промо")
             else:
@@ -1645,7 +1787,11 @@ async def cb_report_results_show(callback: types.CallbackQuery):
         for it in items:
             parts.append(f"   • {it[0]} — <code>{esc(it[1])}</code> ({esc(it[2])})")
         parts.append("───────────────")
-    await callback.message.answer("\n".join(parts))
+    kb_del = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🗑 Удалить итоги этой выдачи", callback_data=f"report_delete:{d}")],
+        [InlineKeyboardButton(text="Отмена", callback_data="noop")]
+    ])
+    await callback.message.answer("\n".join(parts), reply_markup=kb_del)
     await callback.answer()
 
 # ---------------- BOT COMMANDS SETUP ----------------
