@@ -249,11 +249,11 @@ def db_set_setting(key: str, value: str):
         c.execute("REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
     conn.commit()
 
-def get_week_start() -> str:
+def get_week_start() -> date:
     today = datetime.utcnow().date()
-    days_back = (today.weekday() + 1) % 7
-    sunday = today - timedelta(days=days_back)
-    return sunday.isoformat()
+    weekday = today.weekday()  # 0=Mon ... 6=Sun
+    days_since_sunday = (weekday + 1) % 7
+    return today - timedelta(days=days_since_sunday)
 
 def find_user_by_site(site_username: str):
     c = get_cursor()
@@ -281,7 +281,7 @@ def user_already_has_code(tg_id: int, code: str) -> bool:
 
 def add_promocodes(codes: List[str], total_uses: int):
     c = get_cursor()
-    now = now_local().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     for code in codes:
         if USE_POSTGRES:
             c.execute("INSERT INTO promocodes (code, total_uses, used, added_at) VALUES (%s, %s, 0, %s) ON CONFLICT (code) DO NOTHING", (code, total_uses, now))
@@ -342,8 +342,8 @@ async def cmd_start(message: Message, state: FSMContext):
                     ra_dt = datetime.fromisoformat(ra)
                 except:
                     ra_dt = datetime.utcnow() - timedelta(hours=2)
-                if now_local() < (ra_dt + timedelta(hours=1)):
-                    remaining = (ra_dt + timedelta(hours=1)) - now_local()
+                if datetime.utcnow() < (ra_dt + timedelta(hours=1)):
+                    remaining = (ra_dt + timedelta(hours=1)) - datetime.utcnow()
                     mins = int(remaining.total_seconds() // 60) + 1
                     await message.answer(f"❌ Ваша предыдущая заявка была отклонена. Повторная подача возможна через {mins} минут.")
                     return
@@ -498,7 +498,7 @@ async def cb_reject(callback: types.CallbackQuery):
         return
     tgid = int(parts[1])
     c = get_cursor()
-    now_str = now_local().isoformat()
+    now_str = datetime.utcnow().isoformat()
     if USE_POSTGRES:
         c.execute("UPDATE users SET status='rejected', rejected_at = %s WHERE tg_id = %s", (now_str, tgid))
     else:
@@ -656,7 +656,7 @@ async def cmd_missing(message: Message):
     if USE_POSTGRES:
         c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = %s AND user_id IS NULL ORDER BY position", (week,))
     else:
-        c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = ? AND (user_id IS NULL OR user_id = '') ORDER BY position", (week,))
+        c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = ? AND (user_id IS NULL) ORDER BY position", (week,))
     rows = c.fetchall()
     if not rows:
         await message.answer("Пустых позиций нет.")
@@ -745,7 +745,7 @@ async def cmd_assign_start(message: Message, state: FSMContext):
     if USE_POSTGRES:
         c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = %s AND (user_id IS NULL) ORDER BY position", (week,))
     else:
-        c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = ? AND (user_id IS NULL OR user_id = '') ORDER BY position", (week,))
+        c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = ? AND (user_id IS NULL) ORDER BY position", (week,))
     rows = c.fetchall()
     if not rows:
         await message.answer("Нет пустых позиций для назначения.")
@@ -978,7 +978,7 @@ async def givepromo_codes_entered(message: Message, state: FSMContext):
         valid.append((p["id"], code))
     # commit issuance
     issued_codes = []
-    now = now_local().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
     for pid, code in valid:
         if USE_POSTGRES:
             c.execute("INSERT INTO distribution (user_id, promo_id, code, count, source, given_at) VALUES (%s, %s, %s, %s, %s, %s)", (tg_id, pid, code, 1, give_type, now))
@@ -1060,7 +1060,7 @@ async def cb_find_assign(callback: types.CallbackQuery):
     if USE_POSTGRES:
         c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = %s AND (user_id IS NULL) ORDER BY position", (week,))
     else:
-        c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = ? AND (user_id IS NULL OR user_id = '') ORDER BY position", (week,))
+        c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = ? AND (user_id IS NULL OR) ORDER BY position", (week,))
     rows = c.fetchall()
     if not rows:
         await callback.message.edit_text("Нет пустых позиций для назначения.")
@@ -1388,7 +1388,7 @@ async def cb_manual_confirm(callback: types.CallbackQuery):
     c.execute("SELECT id, code, total_uses, used FROM promocodes ORDER BY added_at ASC, id ASC")
     promos = c.fetchall()
     rem_map = {p["code"]:(p["id"], p["total_uses"] - p["used"]) for p in promos}
-    now = now_local().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 
     for pos_number, codes in plan.items():
         # get user_id for this position
@@ -1432,7 +1432,7 @@ async def cb_manual_confirm(callback: types.CallbackQuery):
             except:
                 pass
     conn.commit()
-    db_set_setting("last_distribution_date", get_week_start())
+    db_set_setting("last_distribution_date", str(get_week_start()))
     await callback.message.edit_text("Ручная раздача выполнена.")
     await callback.answer()
 
