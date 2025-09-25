@@ -4,7 +4,6 @@ import html
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict
 
-import pytz
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
@@ -13,7 +12,6 @@ from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
 
 # ---------------- CONFIG ----------------
@@ -24,7 +22,6 @@ try:
     ADMIN_IDS = [int(x.strip()) for x in admin_ids_str.split(",") if x.strip()]
 except ValueError:
     ADMIN_IDS = []
-MOSCOW_TZ = pytz.timezone("Europe/Moscow")
 
 # ---------------- DB SETUP (Postgres if DATABASE_URL present, otherwise fallback to SQLite) ----------------
 USE_POSTGRES = False
@@ -227,7 +224,6 @@ else:
 storage = MemoryStorage()
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=storage)
-scheduler = AsyncIOScheduler(timezone=MOSCOW_TZ)
 
 # ---------------- HELPERS ----------------
 def esc(s: Optional[str]) -> str:
@@ -253,12 +249,9 @@ def db_set_setting(key: str, value: str):
         c.execute("REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
     conn.commit()
 
-def now_msk() -> datetime:
-    return datetime.now(MOSCOW_TZ)
-
 def get_week_start() -> str:
     # determine anchor Sunday 21:08 MSK as week marker as earlier
-    now = now_msk()
+    now = now_local()
     # find sunday date for this week
     days_back = (now.weekday() + 1) % 7
     sunday = now - timedelta(days=days_back)
@@ -293,7 +286,7 @@ def user_already_has_code(tg_id: int, code: str) -> bool:
 
 def add_promocodes(codes: List[str], total_uses: int):
     c = get_cursor()
-    now = now_msk().strftime("%Y-%m-%d %H:%M:%S")
+    now = now_local().strftime("%Y-%m-%d %H:%M:%S")
     for code in codes:
         if USE_POSTGRES:
             c.execute("INSERT INTO promocodes (code, total_uses, used, added_at) VALUES (%s, %s, 0, %s) ON CONFLICT (code) DO NOTHING", (code, total_uses, now))
@@ -354,8 +347,8 @@ async def cmd_start(message: Message, state: FSMContext):
                     ra_dt = datetime.fromisoformat(ra)
                 except:
                     ra_dt = datetime.utcnow() - timedelta(hours=2)
-                if now_msk() < (ra_dt + timedelta(hours=1)):
-                    remaining = (ra_dt + timedelta(hours=1)) - now_msk()
+                if now_local() < (ra_dt + timedelta(hours=1)):
+                    remaining = (ra_dt + timedelta(hours=1)) - now_local()
                     mins = int(remaining.total_seconds() // 60) + 1
                     await message.answer(f"❌ Ваша предыдущая заявка была отклонена. Повторная подача возможна через {mins} минут.")
                     return
@@ -510,7 +503,7 @@ async def cb_reject(callback: types.CallbackQuery):
         return
     tgid = int(parts[1])
     c = get_cursor()
-    now_str = now_msk().isoformat()
+    now_str = now_local().isoformat()
     if USE_POSTGRES:
         c.execute("UPDATE users SET status='rejected', rejected_at = %s WHERE tg_id = %s", (now_str, tgid))
     else:
@@ -990,7 +983,7 @@ async def givepromo_codes_entered(message: Message, state: FSMContext):
         valid.append((p["id"], code))
     # commit issuance
     issued_codes = []
-    now = now_msk().strftime("%Y-%m-%d %H:%M:%S")
+    now = now_local().strftime("%Y-%m-%d %H:%M:%S")
     for pid, code in valid:
         if USE_POSTGRES:
             c.execute("INSERT INTO distribution (user_id, promo_id, code, count, source, given_at) VALUES (%s, %s, %s, %s, %s, %s)", (tg_id, pid, code, 1, give_type, now))
@@ -1342,7 +1335,7 @@ async def send_weekly_confirmation():
             uid = pos["user_id"]
             parts.append(f"{pos['position']}: {pos['site_username']} -> {len(plan.get(pos['position'], []))} промо")
         preview_text = "\n".join(parts)
-    planned_time = now_msk().replace(hour=21, minute=8, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
+    planned_time = now_local().replace(hour=21, minute=8, second=0, microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
     msg_text = (
         f"Запрос на подтверждение еженедельной раздачи промо\n\n"
         f"Планируемая раздача: {planned_time} (MSK)\n"
@@ -1363,7 +1356,7 @@ async def send_weekly_confirmation():
             await bot.send_message(admin, msg_text, reply_markup=kb)
         except:
             pass
-    now = now_msk()
+    now = now_local()
     remind_end = now.replace(hour=21, minute=15, second=0, microsecond=0)
     if now < remind_end:
         job_id = f"weekly_reminder_{get_week_start()}"
@@ -1506,7 +1499,7 @@ async def weekly_distribution_job():
     c.execute("SELECT id, code, total_uses, used FROM promocodes ORDER BY added_at ASC, id ASC")
     promos = c.fetchall()
     rem_map = {p["code"]:(p["id"], p["total_uses"] - p["used"]) for p in promos}
-    now = now_msk().strftime("%Y-%m-%d %H:%M:%S")
+    now = now_local().strftime("%Y-%m-%d %H:%M:%S")
 
     for pos_number, codes in plan.items():
         # get user_id for this position
@@ -1638,7 +1631,7 @@ async def cb_manual_confirm(callback: types.CallbackQuery):
     c.execute("SELECT id, code, total_uses, used FROM promocodes ORDER BY added_at ASC, id ASC")
     promos = c.fetchall()
     rem_map = {p["code"]:(p["id"], p["total_uses"] - p["used"]) for p in promos}
-    now = now_msk().strftime("%Y-%m-%d %H:%M:%S")
+    now = now_local().strftime("%Y-%m-%d %H:%M:%S")
 
     for pos_number, codes in plan.items():
         # get user_id for this position
@@ -1862,7 +1855,6 @@ async def start_webserver():
     print(f"✅ Web server started on port {PORT}")
 
 async def main():
-    scheduler.start()
     # запускаем webserver и polling одновременно
     await asyncio.gather(
         start_webserver(),
