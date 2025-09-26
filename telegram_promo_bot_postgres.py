@@ -411,6 +411,10 @@ async def cmd_promo(message: Message):
         return
 
     week = get_week_start()
+    # make explicit timestamp string YYYY-MM-DD HH:MM:SS (compatible with both Postgres and SQLite)
+    week_start_dt = datetime.combine(week, datetime.min.time())
+    week_start_str = week_start_dt.strftime("%Y-%m-%d %H:%M:%S")
+
     c = get_cursor()
     if USE_POSTGRES:
         c.execute("""
@@ -418,14 +422,14 @@ async def cmd_promo(message: Message):
             FROM distribution
             WHERE user_id = %s AND given_at >= %s
             ORDER BY given_at
-        """, (tg_id, week + " 00:00"))
+        """, (tg_id, week_start_str))
     else:
         c.execute("""
             SELECT code
             FROM distribution
             WHERE user_id = ? AND given_at >= ?
             ORDER BY given_at
-        """, (tg_id, week + " 00:00"))
+        """, (tg_id, week_start_str))
     rows = c.fetchall()
 
     if not rows:
