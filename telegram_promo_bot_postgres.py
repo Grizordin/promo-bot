@@ -503,7 +503,7 @@ async def cb_reject(callback: types.CallbackQuery):
         return
     tgid = int(parts[1])
     c = get_cursor()
-    now_str = datetime.utcnow().isoformat()
+    now_str = datetime.now(timezone.utc).isoformat()
     if USE_POSTGRES:
         c.execute("UPDATE users SET status='rejected', rejected_at = %s WHERE tg_id = %s", (now_str, tgid))
     else:
