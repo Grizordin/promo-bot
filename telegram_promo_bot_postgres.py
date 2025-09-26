@@ -251,7 +251,7 @@ def db_set_setting(key: str, value: str):
     conn.commit()
 
 def get_week_start() -> date:
-    today = datetime.utcnow().date()
+    today = datetime.now(timezone.utc).date()
     weekday = today.weekday()  # 0=Mon ... 6=Sun
     days_since_sunday = (weekday + 1) % 7
     return today - timedelta(days=days_since_sunday)
@@ -282,7 +282,7 @@ def user_already_has_code(tg_id: int, code: str) -> bool:
 
 def add_promocodes(codes: List[str], total_uses: int):
     c = get_cursor()
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     for code in codes:
         if USE_POSTGRES:
             c.execute("INSERT INTO promocodes (code, total_uses, used, added_at) VALUES (%s, %s, 0, %s) ON CONFLICT (code) DO NOTHING", (code, total_uses, now))
@@ -983,7 +983,7 @@ async def givepromo_codes_entered(message: Message, state: FSMContext):
         valid.append((p["id"], code))
     # commit issuance
     issued_codes = []
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     for pid, code in valid:
         if USE_POSTGRES:
             c.execute("INSERT INTO distribution (user_id, promo_id, code, count, source, given_at) VALUES (%s, %s, %s, %s, %s, %s)", (tg_id, pid, code, 1, give_type, now))
@@ -1393,7 +1393,7 @@ async def cb_manual_confirm(callback: types.CallbackQuery):
     c.execute("SELECT id, code, total_uses, used FROM promocodes ORDER BY added_at ASC, id ASC")
     promos = c.fetchall()
     rem_map = {p["code"]:(p["id"], p["total_uses"] - p["used"]) for p in promos}
-    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
     for pos_number, codes in plan.items():
         # get user_id for this position
