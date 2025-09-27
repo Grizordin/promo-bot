@@ -342,9 +342,9 @@ async def cmd_start(message: Message, state: FSMContext):
                 try:
                     ra_dt = datetime.fromisoformat(ra)
                 except:
-                    ra_dt = datetime.utcnow() - timedelta(hours=2)
-                if datetime.utcnow() < (ra_dt + timedelta(hours=1)):
-                    remaining = (ra_dt + timedelta(hours=1)) - datetime.utcnow()
+                    ra_dt = datetime.now(timezone.utc) - timedelta(hours=2)
+                if datetime.now(timezone.utc) < (ra_dt + timedelta(hours=1)):
+                    remaining = (ra_dt + timedelta(hours=1)) - datetime.now(timezone.utc)
                     mins = int(remaining.total_seconds() // 60) + 1
                     await message.answer(f"❌ Ваша предыдущая заявка была отклонена. Повторная подача возможна через {mins} минут.")
                     return
