@@ -135,11 +135,16 @@ if DATABASE_URL:
         for table in tables:
             seq_name = f"{table}_id_seq"
             try:
-                # создаём sequence если её нет
                 c.execute(f"CREATE SEQUENCE IF NOT EXISTS {seq_name};")
                 c.execute(f"ALTER TABLE {table} ALTER COLUMN id SET DEFAULT nextval('{seq_name}');")
                 c.execute(f"ALTER SEQUENCE {seq_name} OWNED BY {table}.id;")
-                c.execute(f"SELECT setval('{seq_name}', COALESCE((SELECT MAX(id) FROM {table}), 0), true);")
+                c.execute(f"""
+                    SELECT setval(
+                        '{seq_name}',
+                        COALESCE((SELECT MAX(id) FROM {table}), 1),
+                        true
+                    )
+                """)
             except Exception as e:
                 print(f"⚠️ Ошибка фикса sequence для {table}: {e}")
         conn.commit()
