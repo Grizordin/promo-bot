@@ -699,14 +699,21 @@ async def cb_users_all(callback: types.CallbackQuery):
     if not rows:
         await callback.message.edit_text("Нет зарегистрированных пользователей.")
         return
-    out = ["👥 Все пользователи (статусы показаны):\n"]
-    for r in rows:
-        out.append(f"👤 site: <code>{esc(r['site_username'] or '-')}</code>")
-        out.append(f"🆔 id: <code>{esc(r['tg_id'])}</code>")
-        out.append(f"🔗 <a href=\"tg://user?id={esc(r['tg_id'])}\">@{esc(r['tg_username'] or r['tg_id'])}</a>")
-        out.append(f"📌 Статус: <code>{esc(r['status'])}</code>")
-        out.append("───────────────")
-    await callback.message.edit_text("\n".join(out))
+
+    batch = []
+    for idx, r in enumerate(rows, start=1):
+        batch.append(f"👤 site: <code>{esc(r['site_username'] or '-')}</code>")
+        batch.append(f"🆔 id: <code>{esc(r['tg_id'])}</code>")
+        batch.append(f"🔗 <a href=\"tg://user?id={esc(r['tg_id'])}\">@{esc(r['tg_username'] or r['tg_id'])}</a>")
+        batch.append(f"📌 Статус: <code>{esc(r['status'])}</code>")
+        batch.append("───────────────")
+
+        if idx % 20 == 0:  # каждые 20 пользователей отправляем сообщение
+            await callback.message.answer("\n".join(batch))
+            batch = []
+
+    if batch:
+        await callback.message.answer("\n".join(batch))
 
 @dp.callback_query(lambda c: c.data == "users_free")
 async def cb_users_free(callback: types.CallbackQuery):
@@ -737,13 +744,20 @@ async def cb_users_free(callback: types.CallbackQuery):
     if not rows:
         await callback.message.edit_text("Нет свободных зарегистрированных.")
         return
-    out = ["👥 Свободные зарегистрированные (не в недельном списке):\n"]
-    for r in rows:
-        out.append(f"👤 site: <code>{esc(r['site_username'] or '-')}</code>")
-        out.append(f"🆔 id: <code>{esc(r['tg_id'])}</code>")
-        out.append(f"🔗 <a href=\"tg://user?id={esc(r['tg_id'])}\">@{esc(r['tg_username'] or r['tg_id'])}</a>")
-        out.append("───────────────")
-    await callback.message.edit_text("\n".join(out))
+
+    batch = []
+    for idx, r in enumerate(rows, start=1):
+        batch.append(f"👤 site: <code>{esc(r['site_username'] or '-')}</code>")
+        batch.append(f"🆔 id: <code>{esc(r['tg_id'])}</code>")
+        batch.append(f"🔗 <a href=\"tg://user?id={esc(r['tg_id'])}\">@{esc(r['tg_username'] or r['tg_id'])}</a>")
+        batch.append("───────────────")
+
+        if idx % 20 == 0:
+            await callback.message.answer("\n".join(batch))
+            batch = []
+
+    if batch:
+        await callback.message.answer("\n".join(batch))
 
 # ---------------- ASSIGN ----------------
 @dp.message(Command("assign"))
@@ -1559,6 +1573,7 @@ async def cb_report_results_show(callback: types.CallbackQuery):
         await callback.message.answer("За выбранную дату выдач не найдено.")
         await callback.answer()
         return
+
     parts = [f"📝 Итоги раздачи за {d}:\n"]
     grouped = {}
     for r in rows:
@@ -1569,11 +1584,21 @@ async def cb_report_results_show(callback: types.CallbackQuery):
         for it in items:
             parts.append(f"   • {it[0]} — <code>{esc(it[1])}</code> ({esc(it[2])})")
         parts.append("───────────────")
+
     kb_del = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🗑 Удалить итоги этой выдачи", callback_data=f"report_delete:{d}")],
         [InlineKeyboardButton(text="Отмена", callback_data="noop")]
     ])
-    await callback.message.answer("\n".join(parts), reply_markup=kb_del)
+
+    # отправляем результат кусками по ~100 строк
+    chunk_size = 100
+    for i in range(0, len(parts), chunk_size):
+        chunk = "\n".join(parts[i:i+chunk_size])
+        if i + chunk_size >= len(parts):
+            await callback.message.answer(chunk, reply_markup=kb_del)
+        else:
+            await callback.message.answer(chunk)
+
     await callback.answer()
 
 # ---------------- BOT COMMANDS SETUP ----------------
