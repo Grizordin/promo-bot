@@ -26,7 +26,7 @@ except ValueError:
 
 # ---------------- DB SETUP (Postgres if DATABASE_URL present, otherwise fallback to SQLite) ----------------
 USE_POSTGRES = False
-DATABASE_URL = os.getenv("DATABASE_URL", sslmode="require")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 if DATABASE_URL:
     USE_POSTGRES = True
@@ -37,7 +37,7 @@ if DATABASE_URL:
     if DATABASE_URL.startswith("postgres://"):
         DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-    conn = psycopg2.connect(DATABASE_URL)
+    conn = psycopg2.connect(DATABASE_URL, sslmode="require")
     # Keep raw cursor factory for creating RealDictCursor when needed
     raw_pg_cursor = conn.cursor
 
