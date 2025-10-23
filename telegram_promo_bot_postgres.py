@@ -37,7 +37,7 @@ if DATABASE_URL:
     if DATABASE_URL.startswith("postgres://"):
         DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-    conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+    conn = psycopg2.connect(DATABASE_URL)
     # Keep raw cursor factory for creating RealDictCursor when needed
     raw_pg_cursor = conn.cursor
 
