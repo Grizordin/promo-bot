@@ -26,7 +26,7 @@ except ValueError:
 
 # ---------------- DB SETUP (Postgres if DATABASE_URL present, otherwise fallback to SQLite) ----------------
 USE_POSTGRES = False
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = os.getenv("DATABASE_URL", sslmode="require")
 
 if DATABASE_URL:
     USE_POSTGRES = True
