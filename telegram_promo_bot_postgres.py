@@ -33,17 +33,30 @@ if DATABASE_URL:
     # psycopg2 imported lazily to avoid import errors when only using sqlite locally
     import psycopg2
     import psycopg2.extras
+    import time
 
-    if DATABASE_URL.startswith("postgres://"):
-        DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    def connect_pg():
+         while True:
+             try:
+                conn = psycopg2.connect(DATABASE_URL, sslmode="require")
+                conn.autocommit = True
+                print("[DB] Connected to PostgreSQL successfully.")
+                return conn
+            except Exception as e:
+                print(f"[DB] Connection failed: {e}. Retrying in 5 seconds...")
+                time.sleep(5)
 
-    conn = psycopg2.connect(DATABASE_URL)
-    # Keep raw cursor factory for creating RealDictCursor when needed
-    raw_pg_cursor = conn.cursor
-
+    conn = connect_pg()
 
     def get_cursor():
-        real_cur = raw_pg_cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        global conn
+        try:
+            real_cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        except (psycopg2.InterfaceError, psycopg2.OperationalError):
+            print("[DB] Reconnecting to PostgreSQL...")
+            conn = connect_pg()
+            real_cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
         class CursorWrapper:
             def __init__(self, rc):
                 self._rc = rc
@@ -53,24 +66,17 @@ if DATABASE_URL:
                         q = query.replace("?", "%s")
                         return self._rc.execute(q, params)
                     return self._rc.execute(query, params) if params is not None else self._rc.execute(query)
-                except Exception:
-                    try:
-                        conn.rollback()
-                    except Exception:
-                        pass
-                    raise
+                except (psycopg2.InterfaceError, psycopg2.OperationalError):
+                    print("[DB] Lost connection, reconnecting...")
+                    conn.rollback()
+                    global conn
+                    conn = connect_pg()
+                    self._rc = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                    return self.execute(query, params)
             def executemany(self, query, seq_of_params):
-                try:
-                    if "?" in query:
-                        q = query.replace("?", "%s")
-                        return self._rc.executemany(q, seq_of_params)
-                    return self._rc.executemany(query, seq_of_params)
-                except Exception:
-                    try:
-                        conn.rollback()
-                    except Exception:
-                        pass
-                    raise
+                if "?" in query:
+                    query = query.replace("?", "%s")
+                return self._rc.executemany(query, seq_of_params)
             def fetchone(self): return self._rc.fetchone()
             def fetchall(self): return self._rc.fetchall()
             def __getattr__(self, name): return getattr(self._rc, name)
