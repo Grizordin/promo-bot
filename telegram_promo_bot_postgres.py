@@ -42,7 +42,7 @@ if DATABASE_URL:
                 conn.autocommit = True
                 print("[DB] Connected to PostgreSQL successfully.")
                 return conn
-            except Exception as e:
+             except Exception as e:
                 print(f"[DB] Connection failed: {e}. Retrying in 5 seconds...")
                 time.sleep(5)
 
