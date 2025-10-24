@@ -35,10 +35,10 @@ if DATABASE_URL:
     import time
     import os
 
-    DATABASE_URL = os.getenv("DATABASE_URL")
-    conn = None
+    conn = None  # глобальная переменная
 
     def connect_pg():
+        """Подключение к PostgreSQL с повторной попыткой при ошибке"""
         while True:
             try:
                 conn = psycopg2.connect(DATABASE_URL, sslmode="require")
@@ -54,16 +54,26 @@ if DATABASE_URL:
     class CursorWrapper:
         def __init__(self, connection):
             self.conn = connection
+            self._ensure_connection()  # проверка соединения при инициализации
             self._rc = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
 
+        def _ensure_connection(self):
+            """Проверяем соединение и создаём новое при необходимости"""
+            try:
+                with self.conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+            except (psycopg2.InterfaceError, psycopg2.OperationalError):
+                print("[DB] Connection closed, reconnecting...")
+                self.conn = connect_pg()
+
         def execute(self, query, params=None):
+            self._ensure_connection()  # проверяем соединение перед запросом
             try:
                 if params is not None and "?" in query:
                     query = query.replace("?", "%s")
                 return self._rc.execute(query, params)
             except (psycopg2.InterfaceError, psycopg2.OperationalError):
-                # Если соединение закрыто, создаём новое
-                print("[DB] Lost connection, reconnecting...")
+                print("[DB] Lost connection during execute, reconnecting...")
                 self.conn = connect_pg()
                 self._rc = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
                 if params is not None and "?" in query:
@@ -71,6 +81,7 @@ if DATABASE_URL:
                 return self._rc.execute(query, params)
 
         def executemany(self, query, seq_of_params):
+            self._ensure_connection()
             if "?" in query:
                 query = query.replace("?", "%s")
             return self._rc.executemany(query, seq_of_params)
@@ -80,6 +91,7 @@ if DATABASE_URL:
         def __getattr__(self, name): return getattr(self._rc, name)
 
     def get_cursor():
+        """Возвращает обёрнутый курсор с автоматическим восстановлением соединения"""
         return CursorWrapper(conn)
 
     # override connection.cursor to return our wrapper (so existing code calling conn.cursor() works)
