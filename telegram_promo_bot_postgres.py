@@ -30,19 +30,21 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 if DATABASE_URL:
     USE_POSTGRES = True
-    # psycopg2 imported lazily to avoid import errors when only using sqlite locally
     import psycopg2
     import psycopg2.extras
     import time
 
+    conn = None  # глобальная переменная
+
     def connect_pg():
-         while True:
-             try:
+        global conn
+        while True:
+            try:
                 conn = psycopg2.connect(DATABASE_URL, sslmode="require")
                 conn.autocommit = True
                 print("[DB] Connected to PostgreSQL successfully.")
                 return conn
-             except Exception as e:
+            except Exception as e:
                 print(f"[DB] Connection failed: {e}. Retrying in 5 seconds...")
                 time.sleep(5)
 
@@ -60,7 +62,9 @@ if DATABASE_URL:
         class CursorWrapper:
             def __init__(self, rc):
                 self._rc = rc
+
             def execute(self, query, params=None):
+                global conn  # объявляем сразу, до любого использования conn
                 try:
                     if params is not None and "?" in query:
                         q = query.replace("?", "%s")
@@ -69,17 +73,19 @@ if DATABASE_URL:
                 except (psycopg2.InterfaceError, psycopg2.OperationalError):
                     print("[DB] Lost connection, reconnecting...")
                     conn.rollback()
-                    global conn
                     conn = connect_pg()
                     self._rc = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
                     return self.execute(query, params)
+
             def executemany(self, query, seq_of_params):
                 if "?" in query:
                     query = query.replace("?", "%s")
                 return self._rc.executemany(query, seq_of_params)
+
             def fetchone(self): return self._rc.fetchone()
             def fetchall(self): return self._rc.fetchall()
             def __getattr__(self, name): return getattr(self._rc, name)
+
         return CursorWrapper(real_cur)
 
     # override connection.cursor to return our wrapper (so existing code calling conn.cursor() works)
