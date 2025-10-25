@@ -1608,7 +1608,7 @@ async def cb_report_results_show(callback: types.CallbackQuery):
             await callback.answer()
             return
 
-    parts = [f"📝 Итоги раздачи за {d}:\n"]
+        parts = [f"📝 Итоги раздачи за {d}:\n"]
     grouped = {}
     for r in rows:
         key = (r["site"], r["tg"])
@@ -1624,14 +1624,27 @@ async def cb_report_results_show(callback: types.CallbackQuery):
         [InlineKeyboardButton(text="Отмена", callback_data="noop")]
     ])
 
-    # отправляем результат кусками по ~100 строк
-    chunk_size = 100
-    for i in range(0, len(parts), chunk_size):
-        chunk = "\n".join(parts[i:i+chunk_size])
-        if i + chunk_size >= len(parts):
-            await callback.message.answer(chunk, reply_markup=kb_del)
-        else:
-            await callback.message.answer(chunk)
+    # функция для безопасной отправки длинных сообщений
+    async def send_long_message(chat_id, text, reply_markup=None, chunk_limit=4000):
+        while text:
+            chunk = text[:chunk_limit]
+            # если не конец текста — обрезаем по последнему переводу строки
+            if len(text) > chunk_limit:
+                last_n = chunk.rfind("\n")
+                if last_n > 0:
+                    chunk = chunk[:last_n]
+            await bot.send_message(chat_id, chunk, reply_markup=reply_markup)
+            text = text[len(chunk):]
+
+    # собираем весь текст в одну строку
+    full_text = "\n".join(parts)
+
+    # отправляем по кускам с клавиатурой только в последнем сообщении
+    await send_long_message(
+        chat_id=callback.message.chat.id,
+        text=full_text,
+        reply_markup=kb_del
+    )
 
     await callback.answer()
 
