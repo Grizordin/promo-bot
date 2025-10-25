@@ -242,8 +242,8 @@ def db_get_setting(key: str) -> str:
             c.execute("SELECT value FROM settings WHERE key = %s", (key,))
         else:
             c.execute("SELECT value FROM settings WHERE key = ?", (key,))
-    r = c.fetchone()
-    return r["value"] if r else ""
+        r = c.fetchone()
+        return r["value"] if r else ""
 
 def db_set_setting(key: str, value: str):
     with get_cursor() as c:
@@ -377,17 +377,17 @@ async def process_registration_nick(message: Message, state: FSMContext):
         else:
             c.execute("SELECT * FROM users WHERE tg_id = ?", (tg_id,))
         existing = c.fetchone()
-    if existing:
-        # update site_username and set status pending (unless approved)
-        if USE_POSTGRES:
-            c.execute("UPDATE users SET site_username = %s, tg_username = %s, status = 'pending', rejected_at = NULL WHERE tg_id = %s", (site_nick, tg_username, tg_id))
+        if existing:
+            # update site_username and set status pending (unless approved)
+            if USE_POSTGRES:
+                c.execute("UPDATE users SET site_username = %s, tg_username = %s, status = 'pending', rejected_at = NULL WHERE tg_id = %s", (site_nick, tg_username, tg_id))
+            else:
+                c.execute("UPDATE users SET site_username = ?, tg_username = ?, status = 'pending', rejected_at = NULL WHERE tg_id = ?", (site_nick, tg_username, tg_id))
         else:
-            c.execute("UPDATE users SET site_username = ?, tg_username = ?, status = 'pending', rejected_at = NULL WHERE tg_id = ?", (site_nick, tg_username, tg_id))
-    else:
-        if USE_POSTGRES:
-            c.execute("INSERT INTO users (tg_id, tg_username, site_username, status) VALUES (%s, %s, %s, 'pending')", (tg_id, tg_username, site_nick))
-        else:
-            c.execute("INSERT INTO users (tg_id, tg_username, site_username, status) VALUES (?, ?, ?, 'pending')", (tg_id, tg_username, site_nick))
+            if USE_POSTGRES:
+                c.execute("INSERT INTO users (tg_id, tg_username, site_username, status) VALUES (%s, %s, %s, 'pending')", (tg_id, tg_username, site_nick))
+            else:
+                c.execute("INSERT INTO users (tg_id, tg_username, site_username, status) VALUES (?, ?, ?, 'pending')", (tg_id, tg_username, site_nick))
     # notify admins with approve/reject buttons
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Одобрить", callback_data=f"approve:{tg_id}")],
@@ -431,7 +431,7 @@ async def cmd_promo(message: Message):
                 WHERE user_id = ? AND given_at >= ?
                 ORDER BY given_at
             """, (tg_id, week_start_str))
-    rows = c.fetchall()
+        rows = c.fetchall()
 
     if not rows:
         await message.answer("❌ На этой неделе вы не были в списке на промо.")
@@ -453,7 +453,7 @@ async def cmd_pending(message: Message):
             c.execute("SELECT tg_id, tg_username, site_username, registered_at FROM users WHERE status = 'pending' ORDER BY registered_at")
         else:
             c.execute("SELECT tg_id, tg_username, site_username, registered_at FROM users WHERE status = 'pending' ORDER BY registered_at")
-    rows = c.fetchall()
+        rows = c.fetchall()
     if not rows:
         await message.answer("Нет ожидающих подтверждения.")
         return
@@ -626,19 +626,19 @@ async def process_setusers_file(message: Message, state: FSMContext):
             c.execute("DELETE FROM weekly_users WHERE week_start = %s", (week,))
         else:
             c.execute("DELETE FROM weekly_users WHERE week_start = ?", (week,))
-    added = 0
-    missing = []
-    for idx, nick in enumerate(lines, start=1):
-        user = find_user_by_site(nick)
-        user_id = user["tg_id"] if user and user["status"] == "approved" else None
-        if USE_POSTGRES:
-            c.execute("INSERT INTO weekly_users (week_start, position, site_username, user_id) VALUES (%s, %s, %s, %s)", (week, idx, nick, user_id))
-        else:
-            c.execute("INSERT INTO weekly_users (week_start, position, site_username, user_id) VALUES (?, ?, ?, ?)", (week, idx, nick, user_id))
-        if user and user["status"] == "approved":
-            added += 1
-        else:
-            missing.append((idx, nick))
+        added = 0
+        missing = []
+        for idx, nick in enumerate(lines, start=1):
+            user = find_user_by_site(nick)
+            user_id = user["tg_id"] if user and user["status"] == "approved" else None
+            if USE_POSTGRES:
+                c.execute("INSERT INTO weekly_users (week_start, position, site_username, user_id) VALUES (%s, %s, %s, %s)", (week, idx, nick, user_id))
+            else:
+                c.execute("INSERT INTO weekly_users (week_start, position, site_username, user_id) VALUES (?, ?, ?, ?)", (week, idx, nick, user_id))
+            if user and user["status"] == "approved":
+                added += 1
+            else:
+                missing.append((idx, nick))
     reply = (
         f"✅ Список обновлён\n"
         f"Позиции: <code>{esc(len(lines))}</code>\n"
@@ -660,7 +660,7 @@ async def cmd_missing(message: Message):
             c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = %s AND user_id IS NULL ORDER BY position", (week,))
         else:
             c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = ? AND (user_id IS NULL) ORDER BY position", (week,))
-    rows = c.fetchall()
+        rows = c.fetchall()
     if not rows:
         await message.answer("Пустых позиций нет.")
         return
@@ -688,7 +688,7 @@ async def cb_users_all(callback: types.CallbackQuery):
         return
     with get_cursor() as c:
         c.execute("SELECT tg_id, site_username, tg_username, status FROM users ORDER BY registered_at")
-    rows = c.fetchall()
+        rows = c.fetchall()
     if not rows:
         await callback.message.edit_text("Нет зарегистрированных пользователей.")
         return
@@ -733,7 +733,7 @@ async def cb_users_free(callback: types.CallbackQuery):
                 )
                 ORDER BY u.registered_at
             """, (week,))
-    rows = c.fetchall()
+        rows = c.fetchall()
     if not rows:
         await callback.message.edit_text("Нет свободных зарегистрированных.")
         return
@@ -763,7 +763,7 @@ async def cmd_assign_start(message: Message, state: FSMContext):
             c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = %s AND (user_id IS NULL) ORDER BY position", (week,))
         else:
             c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = ? AND (user_id IS NULL) ORDER BY position", (week,))
-    rows = c.fetchall()
+        rows = c.fetchall()
     if not rows:
         await message.answer("Нет пустых позиций для назначения.")
         return
@@ -855,13 +855,13 @@ async def cb_assign_choose(callback: types.CallbackQuery):
         else:
             c.execute("SELECT * FROM users WHERE tg_id = ?", (tg_id,))
         u = c.fetchone()
-    if not u:
-        await callback.answer("Пользователь не найден")
-        return
-    if USE_POSTGRES:
-        c.execute("UPDATE weekly_users SET user_id = %s WHERE week_start = %s AND position = %s", (tg_id, week, pos))
-    else:
-        c.execute("UPDATE weekly_users SET user_id = ? WHERE week_start = ? AND position = ?", (tg_id, week, pos))
+        if not u:
+            await callback.answer("Пользователь не найден")
+            return
+        if USE_POSTGRES:
+            c.execute("UPDATE weekly_users SET user_id = %s WHERE week_start = %s AND position = %s", (tg_id, week, pos))
+        else:
+            c.execute("UPDATE weekly_users SET user_id = ? WHERE week_start = ? AND position = ?", (tg_id, week, pos))
     try:
         await callback.message.edit_text(f"✅ Назначено: <code>{esc(u['site_username'])}</code> → позиция #{esc(pos)}")
     except:
@@ -995,14 +995,16 @@ async def givepromo_codes_entered(message: Message, state: FSMContext):
     # commit issuance
     issued_codes = []
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    for pid, code in valid:
-        if USE_POSTGRES:
-            c.execute("INSERT INTO distribution (user_id, promo_id, code, count, source, given_at) VALUES (%s, %s, %s, %s, %s, %s)", (tg_id, pid, code, 1, give_type, now))
-            c.execute("UPDATE promocodes SET used = used + 1 WHERE id = %s", (pid,))
-        else:
-            c.execute("INSERT INTO distribution (user_id, promo_id, code, count, source, given_at) VALUES (?, ?, ?, ?, ?, ?)", (tg_id, pid, code, 1, give_type, now))
-            c.execute("UPDATE promocodes SET used = used + 1 WHERE id = ?", (pid,))
-        issued_codes.append(code)
+    with get_cursor() as c:
+        valid = []
+        for pid, code in valid:
+            if USE_POSTGRES:
+                c.execute("INSERT INTO distribution (user_id, promo_id, code, count, source, given_at) VALUES (%s, %s, %s, %s, %s, %s)", (tg_id, pid, code, 1, give_type, now))
+                c.execute("UPDATE promocodes SET used = used + 1 WHERE id = %s", (pid,))
+            else:
+                c.execute("INSERT INTO distribution (user_id, promo_id, code, count, source, given_at) VALUES (?, ?, ?, ?, ?, ?)", (tg_id, pid, code, 1, give_type, now))
+                c.execute("UPDATE promocodes SET used = used + 1 WHERE id = ?", (pid,))
+            issued_codes.append(code)
     # notify user
     try:
         header = "Привет, твой промокод за недельный топ 🎉🎉🎉\n1.5к камней\n\n"
@@ -1047,8 +1049,12 @@ async def finduser_handle(message: Message, state: FSMContext):
     tid = user["tg_id"]
     tg_v = esc(user["tg_username"])
     week = get_week_start()
-    c.execute("SELECT position FROM weekly_users WHERE week_start = %s AND user_id = %s" if USE_POSTGRES else "SELECT position FROM weekly_users WHERE week_start = ? AND user_id = ?", (week, tid))
-    pos = c.fetchone()
+    with get_cursor() as c:
+        if USE_POSTGRES:
+            c.execute("SELECT position FROM weekly_users WHERE week_start = %s AND user_id = %s", (week, tid))
+        else:
+            c.execute("SELECT position FROM weekly_users WHERE week_start = ? AND user_id = ?", (week, tid))
+        pos = c.fetchone()
     in_list = ("✅ да (позиция #" + str(pos["position"]) + ")") if pos else "❌ нет"
     text = (
         "🔎 Найден пользователь:\n"
@@ -1076,7 +1082,7 @@ async def cb_find_assign(callback: types.CallbackQuery):
         if USE_POSTGRES:
             c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = %s AND (user_id IS NULL) ORDER BY position", (week,))
         else:
-            c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = ? AND (user_id IS NULL OR) ORDER BY position", (week,))
+            c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = ? AND user_id IS NULL ORDER BY position", (week,))
     rows = c.fetchall()
     if not rows:
         await callback.message.edit_text("Нет пустых позиций для назначения.")
@@ -1101,7 +1107,7 @@ async def cmd_promostats(message: Message):
             c.execute("SELECT DISTINCT added_at FROM promocodes ORDER BY added_at DESC LIMIT 50")
         else:
             c.execute("SELECT DISTINCT added_at FROM promocodes ORDER BY added_at DESC LIMIT 50")
-    rows = c.fetchall()
+        rows = c.fetchall()
     if not rows:
         await message.answer("Промокоды не добавлены.")
         return
@@ -1167,8 +1173,6 @@ async def cb_promostats_delete_confirm(callback: types.CallbackQuery):
                 c.execute("DELETE FROM promocodes WHERE added_at = ?", (ts_str,))
             await callback.message.answer(f"Удаление промокодов, загруженных {ts_str}, выполнено.")
         except Exception as exc:
-            if USE_POSTGRES:
-                conn.rollback()
             await callback.message.answer(f"Ошибка при удалении: {exc}")
         await callback.answer()
 
@@ -1206,8 +1210,6 @@ async def cb_report_delete_confirm(callback: types.CallbackQuery):
                 c.execute("DELETE FROM distribution WHERE DATE(given_at) = ?", (d,))
             await callback.message.answer(f"Удаление записей выдач за {d} выполнено.")
         except Exception as exc:
-            if USE_POSTGRES:
-                conn.rollback()
             await callback.message.answer(f"Ошибка при удалении: {exc}")
         await callback.answer()
 
@@ -1231,28 +1233,28 @@ def compute_allocation_ordered() -> Dict[int, List[str]]:
             c.execute("SELECT position, user_id FROM weekly_users WHERE week_start = %s ORDER BY position", (week,))
         else:
             c.execute("SELECT position, user_id FROM weekly_users WHERE week_start = ? ORDER BY position", (week,))
-    positions = c.fetchall()
-    if not positions:
-        return {}
+        positions = c.fetchall()
+        if not positions:
+            return {}
 
-    n_positions = len(positions)
+        n_positions = len(positions)
 
-    # 2) берем только последние загруженные промо
-    if USE_POSTGRES:
-        c.execute("""
-            SELECT id, code, total_uses, used
-            FROM promocodes
-            WHERE added_at = (SELECT MAX(added_at) FROM promocodes)
-            ORDER BY id ASC
-        """)
-    else:
-        c.execute("""
-            SELECT id, code, total_uses, used
-            FROM promocodes
-            WHERE added_at = (SELECT MAX(added_at) FROM promocodes)
-            ORDER BY id ASC
-        """)
-    promos = c.fetchall()
+        # 2) берем только последние загруженные промо
+        if USE_POSTGRES:
+            c.execute("""
+                SELECT id, code, total_uses, used
+                FROM promocodes
+                WHERE added_at = (SELECT MAX(added_at) FROM promocodes)
+                ORDER BY id ASC
+            """)
+        else:
+            c.execute("""
+                SELECT id, code, total_uses, used
+                FROM promocodes
+                WHERE added_at = (SELECT MAX(added_at) FROM promocodes)
+                ORDER BY id ASC
+            """)
+        promos = c.fetchall()
     promo_iter = [{"id": p["id"], "code": p["code"], "remaining": max(0, p["total_uses"] - p["used"])} for p in promos if (p["total_uses"] - p["used"]) > 0]
     if not promo_iter:
         return {}
@@ -1330,10 +1332,10 @@ async def cmd_distribute_now(message: Message):
     with get_cursor() as c:
         c.execute("SELECT MAX(week_start) AS last_list FROM weekly_users")
         last_list_row = c.fetchone()
-    last_list = last_list_row["last_list"] if last_list_row else None
-    c.execute("SELECT MAX(added_at) AS last_promos FROM promocodes")
-    last_promos_row = c.fetchone()
-    last_promos = last_promos_row["last_promos"] if last_promos_row else None
+        last_list = last_list_row["last_list"] if last_list_row else None
+        c.execute("SELECT MAX(added_at) AS last_promos FROM promocodes")
+        last_promos_row = c.fetchone()
+        last_promos = last_promos_row["last_promos"] if last_promos_row else None
 
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Показать план", callback_data="manual_plan")],
@@ -1409,7 +1411,7 @@ async def cb_manual_confirm(callback: types.CallbackQuery):
             c.execute("SELECT user_id FROM weekly_users WHERE week_start = %s AND position = %s", (week, pos_number))
         else:
             c.execute("SELECT user_id FROM weekly_users WHERE week_start = ? AND position = ?", (week, pos_number))
-        row = c.fetchone()
+            row = c.fetchone()
         if not row or not row.get("user_id"):
             continue
         tg_id = row["user_id"]
