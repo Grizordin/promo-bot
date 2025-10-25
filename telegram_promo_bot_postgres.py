@@ -327,7 +327,7 @@ async def cmd_start(message: Message, state: FSMContext):
             c.execute("SELECT * FROM users WHERE tg_id = %s", (tg_id,))
         else:
             c.execute("SELECT * FROM users WHERE tg_id = ?", (tg_id,))
-    u = c.fetchone()
+        u = c.fetchone()
     if u:
         status = u["status"]
         site = u["site_username"] or "-"
@@ -365,7 +365,7 @@ async def process_registration_nick(message: Message, state: FSMContext):
             c.execute("SELECT * FROM users WHERE site_username = %s AND tg_id != %s", (site_nick, tg_id))
         else:
             c.execute("SELECT * FROM users WHERE site_username = ? AND tg_id != ?", (site_nick, tg_id))
-    conflict = c.fetchone()
+        conflict = c.fetchone()
     if conflict and conflict["status"] == "approved":
         await message.answer("Этот ник уже зарегистрирован другим пользователем. Если вы считаете это ошибкой, свяжитесь с администратором.")
         await state.clear()
@@ -376,7 +376,7 @@ async def process_registration_nick(message: Message, state: FSMContext):
             c.execute("SELECT * FROM users WHERE tg_id = %s", (tg_id,))
         else:
             c.execute("SELECT * FROM users WHERE tg_id = ?", (tg_id,))
-    existing = c.fetchone()
+        existing = c.fetchone()
     if existing:
         # update site_username and set status pending (unless approved)
         if USE_POSTGRES:
@@ -787,7 +787,7 @@ async def assign_got_pos(message: Message, state: FSMContext):
             c.execute("SELECT * FROM weekly_users WHERE week_start = %s AND position = %s", (week, pos))
         else:
             c.execute("SELECT * FROM weekly_users WHERE week_start = ? AND position = ?", (week, pos))
-    row = c.fetchone()
+        row = c.fetchone()
     if not row:
         await message.answer("Позиции с таким номером нет. Проверьте /missing.")
         await state.clear()
@@ -854,7 +854,7 @@ async def cb_assign_choose(callback: types.CallbackQuery):
             c.execute("SELECT * FROM users WHERE tg_id = %s", (tg_id,))
         else:
             c.execute("SELECT * FROM users WHERE tg_id = ?", (tg_id,))
-    u = c.fetchone()
+        u = c.fetchone()
     if not u:
         await callback.answer("Пользователь не найден")
         return
@@ -1329,7 +1329,7 @@ async def cmd_distribute_now(message: Message):
     week = get_week_start()
     with get_cursor() as c:
         c.execute("SELECT MAX(week_start) AS last_list FROM weekly_users")
-    last_list_row = c.fetchone()
+        last_list_row = c.fetchone()
     last_list = last_list_row["last_list"] if last_list_row else None
     c.execute("SELECT MAX(added_at) AS last_promos FROM promocodes")
     last_promos_row = c.fetchone()
