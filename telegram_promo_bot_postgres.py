@@ -849,7 +849,7 @@ async def cb_assign_choose(callback: types.CallbackQuery):
     pos = int(parts[1])
     tg_id = int(parts[2])
     week = get_week_start()
-    with get_cursor() as c:)
+    with get_cursor() as c:
         if USE_POSTGRES:
             c.execute("SELECT * FROM users WHERE tg_id = %s", (tg_id,))
         else:
