@@ -31,153 +31,137 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if DATABASE_URL:
     USE_POSTGRES = True
     import psycopg2
+    from psycopg2.pool import SimpleConnectionPool
     import psycopg2.extras
+    from contextlib import contextmanager
     import time
-    import os
 
-    conn = None  # глобальная переменная
+    # ---------------- PostgreSQL Connection Pool ----------------
+    db_pool = None
 
-    def connect_pg():
-        """Подключение к PostgreSQL с повторной попыткой при ошибке"""
+    def init_db_pool():
+        """Инициализирует пул соединений с повторными попытками"""
+        global db_pool
         while True:
             try:
-                conn = psycopg2.connect(DATABASE_URL, sslmode="require")
-                conn.autocommit = True
-                print("[DB] Connected to PostgreSQL successfully.")
-                return conn
+                db_pool = SimpleConnectionPool(
+                    1, 10,  # минимум 1, максимум 10 соединений
+                    dsn=DATABASE_URL,
+                    sslmode="require"
+                )
+                print("[DB] ✅ PostgreSQL pool initialized.")
+                break
             except Exception as e:
-                print(f"[DB] Connection failed: {e}. Retrying in 5 seconds...")
+                print(f"[DB] ❌ Failed to init pool: {e}. Retrying in 5 seconds...")
                 time.sleep(5)
 
-    conn = connect_pg()
+    def get_connection():
+        """Получает соединение из пула"""
+        global db_pool
+        if db_pool is None:
+            init_db_pool()
+        try:
+            return db_pool.getconn()
+        except Exception as e:
+            print(f"[DB] ⚠️ Failed to get connection: {e}. Reinitializing pool...")
+            init_db_pool()
+            return db_pool.getconn()
 
-    class CursorWrapper:
-        def __init__(self, connection):
-            self.conn = connection
-            self._ensure_connection()  # проверка соединения при инициализации
-            self._rc = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-
-        def _ensure_connection(self):
-            """Проверяем соединение и создаём новое при необходимости"""
+    def release_connection(conn):
+        """Возвращает соединение обратно в пул"""
+        global db_pool
+        if db_pool and conn:
             try:
-                with self.conn.cursor() as cur:
-                    cur.execute("SELECT 1")
-            except (psycopg2.InterfaceError, psycopg2.OperationalError):
-                print("[DB] Connection closed, reconnecting...")
-                self.conn = connect_pg()
-
-        def execute(self, query, params=None):
-            self._ensure_connection()  # проверяем соединение перед запросом
-            try:
-                if params is not None and "?" in query:
-                    query = query.replace("?", "%s")
-                return self._rc.execute(query, params)
-            except (psycopg2.InterfaceError, psycopg2.OperationalError):
-                print("[DB] Lost connection during execute, reconnecting...")
-                self.conn = connect_pg()
-                self._rc = self.conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-                if params is not None and "?" in query:
-                    query = query.replace("?", "%s")
-                return self._rc.execute(query, params)
-
-        def executemany(self, query, seq_of_params):
-            self._ensure_connection()
-            if "?" in query:
-                query = query.replace("?", "%s")
-            return self._rc.executemany(query, seq_of_params)
-
-        def fetchone(self): return self._rc.fetchone()
-        def fetchall(self): return self._rc.fetchall()
-        def __getattr__(self, name): return getattr(self._rc, name)
-
-    def get_cursor():
-        """Возвращает обёрнутый курсор с автоматическим восстановлением соединения"""
-        return CursorWrapper(conn)
-
-    # override connection.cursor to return our wrapper (so existing code calling conn.cursor() works)
-
-    # create tables for Postgres (SERIAL, BIGINT, etc.)
-    c = get_cursor()
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        id SERIAL PRIMARY KEY,
-        tg_id BIGINT UNIQUE,
-        tg_username TEXT,
-        site_username TEXT,
-        role TEXT DEFAULT 'user',
-        status TEXT DEFAULT 'pending',
-        rejected_at TIMESTAMP,
-        registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-    """)
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS promocodes (
-        id SERIAL PRIMARY KEY,
-        code TEXT UNIQUE,
-        total_uses INTEGER,
-        used INTEGER DEFAULT 0,
-        added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-    """)
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS settings (
-        key TEXT PRIMARY KEY,
-        value TEXT
-    );
-    """)
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS distribution (
-        id SERIAL PRIMARY KEY,
-        user_id BIGINT,
-        promo_id INTEGER,
-        code TEXT,
-        count INTEGER,
-        source TEXT,
-        given_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    );
-    """)
-    c.execute("""
-    CREATE TABLE IF NOT EXISTS weekly_users (
-        id SERIAL PRIMARY KEY,
-        week_start DATE,
-        position INTEGER,
-        site_username TEXT,
-        user_id BIGINT
-    );
-    """)
-    def fix_sequences():
-        if not USE_POSTGRES:
-            return
-        c = get_cursor()
-        tables = ["users", "promocodes", "distribution", "weekly_users"]
-        for table in tables:
-            seq_name = f"{table}_id_seq"
-            try:
-                c.execute(f"CREATE SEQUENCE IF NOT EXISTS {seq_name};")
-                c.execute(f"ALTER TABLE {table} ALTER COLUMN id SET DEFAULT nextval('{seq_name}');")
-                c.execute(f"ALTER SEQUENCE {seq_name} OWNED BY {table}.id;")
-                c.execute(f"""
-                    SELECT setval(
-                        '{seq_name}',
-                        COALESCE((SELECT MAX(id) FROM {table}), 1),
-                        true
-                    )
-                """)
+                db_pool.putconn(conn)
             except Exception as e:
-                print(f"⚠️ Ошибка фикса sequence для {table}: {e}")
-        conn.commit()
+                print(f"[DB] ⚠️ Failed to release connection: {e}")
 
-    # вызови сразу после миграции
-    fix_sequences()
-    conn.commit()
+    @contextmanager
+    def get_cursor():
+        """
+        Контекстный менеджер, который:
+        - берёт соединение из пула
+        - создаёт курсор
+        - автоматически делает commit/rollback
+        - возвращает соединение в пул
+        """
+        conn = get_connection()
+        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        try:
+            yield cur
+        except Exception as e:
+            conn.rollback()
+            print(f"[DB] ❌ Query failed: {e}")
+            raise
+        finally:
+            cur.close()
+            release_connection(conn)
 
-    # default settings initialization (Postgres style)
-    c.execute("INSERT INTO settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING", ("weekly_confirmed", "0"))
-    c.execute("INSERT INTO settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING", ("last_distribution_date", ""))
-    conn.commit()
+    # ---------------- Создание таблиц ----------------
+    init_db_pool()
+
+    with get_cursor() as c:
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            tg_id BIGINT UNIQUE,
+            tg_username TEXT,
+            site_username TEXT,
+            role TEXT DEFAULT 'user',
+            status TEXT DEFAULT 'pending',
+            rejected_at TIMESTAMP,
+            registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """)
+
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS promocodes (
+            id SERIAL PRIMARY KEY,
+            code TEXT UNIQUE,
+            total_uses INTEGER,
+            used INTEGER DEFAULT 0,
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """)
+
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        );
+        """)
+
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS distribution (
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT,
+            promo_id INTEGER,
+            code TEXT,
+            count INTEGER,
+            source TEXT,
+            given_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        """)
+
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS weekly_users (
+            id SERIAL PRIMARY KEY,
+            week_start DATE,
+            position INTEGER,
+            site_username TEXT,
+            user_id BIGINT
+        );
+        """)
+
+    # ---------------- Инициализация настроек ----------------
+    with get_cursor() as c:
+        c.execute("INSERT INTO settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING",
+                  ("weekly_confirmed", "0"))
+        c.execute("INSERT INTO settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING",
+                  ("last_distribution_date", ""))
 
 else:
-    # fallback to sqlite for local/testing use (preserves your existing DB file)
+    # fallback to sqlite for local/testing use
     import sqlite3
     DB_FILE = "telegram_promo_bot.db"
     conn = sqlite3.connect(DB_FILE, check_same_thread=False)
@@ -187,7 +171,7 @@ else:
     # create tables (sqlite dialect)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS users (
-        id SERIAL PRIMARY KEY,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         tg_id BIGINT UNIQUE,
         tg_username TEXT,
         site_username TEXT,
@@ -200,7 +184,7 @@ else:
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS promocodes (
-        id SERIAL PRIMARY KEY,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         code TEXT UNIQUE,
         total_uses INTEGER,
         used INTEGER DEFAULT 0,
@@ -217,7 +201,7 @@ else:
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS distribution (
-        id SERIAL PRIMARY KEY,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         user_id BIGINT,
         promo_id INTEGER,
         code TEXT,
@@ -229,7 +213,7 @@ else:
 
     cur.execute("""
     CREATE TABLE IF NOT EXISTS weekly_users (
-        id SERIAL PRIMARY KEY,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
         week_start DATE,
         position INTEGER,
         site_username TEXT,
@@ -237,12 +221,9 @@ else:
     );
     """)
 
-    conn.commit()
-
     # default settings initialization (sqlite style)
     cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", ("weekly_confirmed", "0"))
     cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", ("last_distribution_date", ""))
-    conn.commit()
 
 # ---------------- BOT / DISPATCHER / SCHEDULER ----------------
 storage = MemoryStorage()
@@ -256,22 +237,21 @@ def esc(s: Optional[str]) -> str:
     return html.escape(str(s))
 
 def db_get_setting(key: str) -> str:
-    c = get_cursor()
-    if USE_POSTGRES:
-        c.execute("SELECT value FROM settings WHERE key = %s", (key,))
-    else:
-        c.execute("SELECT value FROM settings WHERE key = ?", (key,))
+    with get_cursor() as c:
+        if USE_POSTGRES:
+            c.execute("SELECT value FROM settings WHERE key = %s", (key,))
+        else:
+            c.execute("SELECT value FROM settings WHERE key = ?", (key,))
     r = c.fetchone()
     return r["value"] if r else ""
 
 def db_set_setting(key: str, value: str):
-    c = get_cursor()
-    if USE_POSTGRES:
-        c.execute("INSERT INTO settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (key, value))
-    else:
-        # sqlite: REPLACE INTO will insert or replace existing row
-        c.execute("REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
-    conn.commit()
+    with get_cursor() as c:
+        if USE_POSTGRES:
+            c.execute("INSERT INTO settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (key, value))
+        else:
+            # sqlite: REPLACE INTO will insert or replace existing row
+            c.execute("REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
 
 def get_week_start() -> date:
     today = datetime.now(timezone.utc).date()
@@ -280,38 +260,37 @@ def get_week_start() -> date:
     return today - timedelta(days=days_since_sunday)
 
 def find_user_by_site(site_username: str):
-    c = get_cursor()
-    if USE_POSTGRES:
-        c.execute("SELECT * FROM users WHERE site_username = %s", (site_username,))
-    else:
-        c.execute("SELECT * FROM users WHERE site_username = ?", (site_username,))
-    return c.fetchone()
+    with get_cursor() as c:
+        if USE_POSTGRES:
+            c.execute("SELECT * FROM users WHERE site_username = %s", (site_username,))
+        else:
+            c.execute("SELECT * FROM users WHERE site_username = ?", (site_username,))
+        return c.fetchone()
 
 def find_user_by_tgid(tg_id: int):
-    c = get_cursor()
-    if USE_POSTGRES:
-        c.execute("SELECT * FROM users WHERE tg_id = %s", (tg_id,))
-    else:
-        c.execute("SELECT * FROM users WHERE tg_id = ?", (tg_id,))
-    return c.fetchone()
+    with get_cursor() as c:
+        if USE_POSTGRES:
+            c.execute("SELECT * FROM users WHERE tg_id = %s", (tg_id,))
+        else:
+            c.execute("SELECT * FROM users WHERE tg_id = ?", (tg_id,))
+        return c.fetchone()
 
 def user_already_has_code(tg_id: int, code: str) -> bool:
-    c = get_cursor()
-    if USE_POSTGRES:
-        c.execute("SELECT 1 FROM distribution WHERE user_id = %s AND code = %s", (tg_id, code))
-    else:
-        c.execute("SELECT 1 FROM distribution WHERE user_id = ? AND code = ?", (tg_id, code))
-    return c.fetchone() is not None
+    with get_cursor() as c:
+        if USE_POSTGRES:
+            c.execute("SELECT 1 FROM distribution WHERE user_id = %s AND code = %s", (tg_id, code))
+        else:
+            c.execute("SELECT 1 FROM distribution WHERE user_id = ? AND code = ?", (tg_id, code))
+        return c.fetchone() is not None
 
 def add_promocodes(codes: List[str], total_uses: int):
-    c = get_cursor()
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    for code in codes:
-        if USE_POSTGRES:
-            c.execute("INSERT INTO promocodes (code, total_uses, used, added_at) VALUES (%s, %s, 0, %s) ON CONFLICT (code) DO NOTHING", (code, total_uses, now))
-        else:
-            c.execute("INSERT OR IGNORE INTO promocodes (code, total_uses, used, added_at) VALUES (?, ?, 0, ?)", (code, total_uses, now))
-    conn.commit()
+    with get_cursor() as c:
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        for code in codes:
+            if USE_POSTGRES:
+                c.execute("INSERT INTO promocodes (code, total_uses, used, added_at) VALUES (%s, %s, 0, %s) ON CONFLICT (code) DO NOTHING", (code, total_uses, now))
+            else:
+                c.execute("INSERT OR IGNORE INTO promocodes (code, total_uses, used, added_at) VALUES (?, ?, 0, ?)", (code, total_uses, now))
 
 # ---------------- FSM STATES ----------------
 class RegisterState(StatesGroup):
@@ -343,11 +322,11 @@ class FindUserState(StatesGroup):
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
     tg_id = message.from_user.id
-    c = get_cursor()
-    if USE_POSTGRES:
-        c.execute("SELECT * FROM users WHERE tg_id = %s", (tg_id,))
-    else:
-        c.execute("SELECT * FROM users WHERE tg_id = ?", (tg_id,))
+    with get_cursor() as c:
+        if USE_POSTGRES:
+            c.execute("SELECT * FROM users WHERE tg_id = %s", (tg_id,))
+        else:
+            c.execute("SELECT * FROM users WHERE tg_id = ?", (tg_id,))
     u = c.fetchone()
     if u:
         status = u["status"]
@@ -381,22 +360,22 @@ async def process_registration_nick(message: Message, state: FSMContext):
     site_nick = message.text.strip()
     tg_id = message.from_user.id
     tg_username = message.from_user.username or message.from_user.full_name or ""
-    c = get_cursor()
-    if USE_POSTGRES:
-        c.execute("SELECT * FROM users WHERE site_username = %s AND tg_id != %s", (site_nick, tg_id))
-    else:
-        c.execute("SELECT * FROM users WHERE site_username = ? AND tg_id != ?", (site_nick, tg_id))
+    with get_cursor() as c:
+        if USE_POSTGRES:
+            c.execute("SELECT * FROM users WHERE site_username = %s AND tg_id != %s", (site_nick, tg_id))
+        else:
+            c.execute("SELECT * FROM users WHERE site_username = ? AND tg_id != ?", (site_nick, tg_id))
     conflict = c.fetchone()
     if conflict and conflict["status"] == "approved":
         await message.answer("Этот ник уже зарегистрирован другим пользователем. Если вы считаете это ошибкой, свяжитесь с администратором.")
         await state.clear()
         return
     # upsert user row: create or update
-    c = get_cursor()
-    if USE_POSTGRES:
-        c.execute("SELECT * FROM users WHERE tg_id = %s", (tg_id,))
-    else:
-        c.execute("SELECT * FROM users WHERE tg_id = ?", (tg_id,))
+    with get_cursor() as c:
+        if USE_POSTGRES:
+            c.execute("SELECT * FROM users WHERE tg_id = %s", (tg_id,))
+        else:
+            c.execute("SELECT * FROM users WHERE tg_id = ?", (tg_id,))
     existing = c.fetchone()
     if existing:
         # update site_username and set status pending (unless approved)
@@ -409,7 +388,6 @@ async def process_registration_nick(message: Message, state: FSMContext):
             c.execute("INSERT INTO users (tg_id, tg_username, site_username, status) VALUES (%s, %s, %s, 'pending')", (tg_id, tg_username, site_nick))
         else:
             c.execute("INSERT INTO users (tg_id, tg_username, site_username, status) VALUES (?, ?, ?, 'pending')", (tg_id, tg_username, site_nick))
-    conn.commit()
     # notify admins with approve/reject buttons
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Одобрить", callback_data=f"approve:{tg_id}")],
@@ -438,21 +416,21 @@ async def cmd_promo(message: Message):
     week_start_dt = datetime.combine(week, datetime.min.time())
     week_start_str = week_start_dt.strftime("%Y-%m-%d %H:%M:%S")
 
-    c = get_cursor()
-    if USE_POSTGRES:
-        c.execute("""
-            SELECT code
-            FROM distribution
-            WHERE user_id = %s AND given_at >= %s
-            ORDER BY given_at
-        """, (tg_id, week_start_str))
-    else:
-        c.execute("""
-            SELECT code
-            FROM distribution
-            WHERE user_id = ? AND given_at >= ?
-            ORDER BY given_at
-        """, (tg_id, week_start_str))
+    with get_cursor() as c:
+        if USE_POSTGRES:
+            c.execute("""
+                SELECT code
+                FROM distribution
+                WHERE user_id = %s AND given_at >= %s
+                ORDER BY given_at
+            """, (tg_id, week_start_str))
+        else:
+            c.execute("""
+                SELECT code
+                FROM distribution
+                WHERE user_id = ? AND given_at >= ?
+                ORDER BY given_at
+            """, (tg_id, week_start_str))
     rows = c.fetchall()
 
     if not rows:
@@ -470,11 +448,11 @@ async def cmd_promo(message: Message):
 async def cmd_pending(message: Message):
     if message.from_user.id not in ADMIN_IDS:
         return
-    c = get_cursor()
-    if USE_POSTGRES:
-        c.execute("SELECT tg_id, tg_username, site_username, registered_at FROM users WHERE status = 'pending' ORDER BY registered_at")
-    else:
-        c.execute("SELECT tg_id, tg_username, site_username, registered_at FROM users WHERE status = 'pending' ORDER BY registered_at")
+    with get_cursor() as c:
+        if USE_POSTGRES:
+            c.execute("SELECT tg_id, tg_username, site_username, registered_at FROM users WHERE status = 'pending' ORDER BY registered_at")
+        else:
+            c.execute("SELECT tg_id, tg_username, site_username, registered_at FROM users WHERE status = 'pending' ORDER BY registered_at")
     rows = c.fetchall()
     if not rows:
         await message.answer("Нет ожидающих подтверждения.")
@@ -499,12 +477,11 @@ async def cb_approve(callback: types.CallbackQuery):
         await callback.answer()
         return
     tgid = int(parts[1])
-    c = get_cursor()
-    if USE_POSTGRES:
-        c.execute("UPDATE users SET status='approved', rejected_at = NULL WHERE tg_id = %s", (tgid,))
-    else:
-        c.execute("UPDATE users SET status='approved', rejected_at = NULL WHERE tg_id = ?", (tgid,))
-    conn.commit()
+    with get_cursor() as c:
+        if USE_POSTGRES:
+            c.execute("UPDATE users SET status='approved', rejected_at = NULL WHERE tg_id = %s", (tgid,))
+        else:
+            c.execute("UPDATE users SET status='approved', rejected_at = NULL WHERE tg_id = ?", (tgid,))
     try:
         await callback.message.edit_text(f"Пользователь <code>{esc(tgid)}</code> одобрен.")
     except:
@@ -525,13 +502,12 @@ async def cb_reject(callback: types.CallbackQuery):
         await callback.answer()
         return
     tgid = int(parts[1])
-    c = get_cursor()
     now_str = datetime.now(timezone.utc).isoformat()
-    if USE_POSTGRES:
-        c.execute("UPDATE users SET status='rejected', rejected_at = %s WHERE tg_id = %s", (now_str, tgid))
-    else:
-        c.execute("UPDATE users SET status='rejected', rejected_at = ? WHERE tg_id = ?", (now_str, tgid))
-    conn.commit()
+    with get_cursor() as c:
+        if USE_POSTGRES:
+            c.execute("UPDATE users SET status='rejected', rejected_at = %s WHERE tg_id = %s", (now_str, tgid))
+        else:
+            c.execute("UPDATE users SET status='rejected', rejected_at = ? WHERE tg_id = ?", (now_str, tgid))
     try:
         await callback.message.edit_text(f"Пользователь <code>{esc(tgid)}</code> отклонён.")
     except:
@@ -645,11 +621,11 @@ async def process_setusers_file(message: Message, state: FSMContext):
         return
 
     week = get_week_start()
-    c = get_cursor()
-    if USE_POSTGRES:
-        c.execute("DELETE FROM weekly_users WHERE week_start = %s", (week,))
-    else:
-        c.execute("DELETE FROM weekly_users WHERE week_start = ?", (week,))
+    with get_cursor() as c:
+        if USE_POSTGRES:
+            c.execute("DELETE FROM weekly_users WHERE week_start = %s", (week,))
+        else:
+            c.execute("DELETE FROM weekly_users WHERE week_start = ?", (week,))
     added = 0
     missing = []
     for idx, nick in enumerate(lines, start=1):
@@ -663,7 +639,6 @@ async def process_setusers_file(message: Message, state: FSMContext):
             added += 1
         else:
             missing.append((idx, nick))
-    conn.commit()
     reply = (
         f"✅ Список обновлён\n"
         f"Позиции: <code>{esc(len(lines))}</code>\n"
@@ -680,11 +655,11 @@ async def cmd_missing(message: Message):
     if message.from_user.id not in ADMIN_IDS:
         return
     week = get_week_start()
-    c = get_cursor()
-    if USE_POSTGRES:
-        c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = %s AND user_id IS NULL ORDER BY position", (week,))
-    else:
-        c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = ? AND (user_id IS NULL) ORDER BY position", (week,))
+    with get_cursor() as c:
+        if USE_POSTGRES:
+            c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = %s AND user_id IS NULL ORDER BY position", (week,))
+        else:
+            c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = ? AND (user_id IS NULL) ORDER BY position", (week,))
     rows = c.fetchall()
     if not rows:
         await message.answer("Пустых позиций нет.")
@@ -711,8 +686,8 @@ async def cb_users_all(callback: types.CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         await callback.answer("Нет прав")
         return
-    c = get_cursor()
-    c.execute("SELECT tg_id, site_username, tg_username, status FROM users ORDER BY registered_at")
+    with get_cursor() as c:
+        c.execute("SELECT tg_id, site_username, tg_username, status FROM users ORDER BY registered_at")
     rows = c.fetchall()
     if not rows:
         await callback.message.edit_text("Нет зарегистрированных пользователей.")
@@ -739,25 +714,25 @@ async def cb_users_free(callback: types.CallbackQuery):
         await callback.answer("Нет прав")
         return
     week = get_week_start()
-    c = get_cursor()
-    if USE_POSTGRES:
-        c.execute("""
-            SELECT u.tg_id, u.site_username, u.tg_username
-            FROM users u
-            WHERE u.status='approved' AND u.tg_id NOT IN (
-                SELECT user_id FROM weekly_users WHERE week_start = %s AND user_id IS NOT NULL
-            )
-            ORDER BY u.registered_at
-        """, (week,))
-    else:
-        c.execute("""
-            SELECT u.tg_id, u.site_username, u.tg_username
-            FROM users u
-            WHERE u.status='approved' AND u.tg_id NOT IN (
-                SELECT user_id FROM weekly_users WHERE week_start = ? AND user_id IS NOT NULL
-            )
-            ORDER BY u.registered_at
-        """, (week,))
+    with get_cursor() as c:
+        if USE_POSTGRES:
+            c.execute("""
+                SELECT u.tg_id, u.site_username, u.tg_username
+                FROM users u
+                WHERE u.status='approved' AND u.tg_id NOT IN (
+                    SELECT user_id FROM weekly_users WHERE week_start = %s AND user_id IS NOT NULL
+                )
+                ORDER BY u.registered_at
+            """, (week,))
+        else:
+            c.execute("""
+                SELECT u.tg_id, u.site_username, u.tg_username
+                FROM users u
+                WHERE u.status='approved' AND u.tg_id NOT IN (
+                    SELECT user_id FROM weekly_users WHERE week_start = ? AND user_id IS NOT NULL
+                )
+                ORDER BY u.registered_at
+            """, (week,))
     rows = c.fetchall()
     if not rows:
         await callback.message.edit_text("Нет свободных зарегистрированных.")
@@ -783,11 +758,11 @@ async def cmd_assign_start(message: Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
         return
     week = get_week_start()
-    c = get_cursor()
-    if USE_POSTGRES:
-        c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = %s AND (user_id IS NULL) ORDER BY position", (week,))
-    else:
-        c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = ? AND (user_id IS NULL) ORDER BY position", (week,))
+    with get_cursor() as c:
+        if USE_POSTGRES:
+            c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = %s AND (user_id IS NULL) ORDER BY position", (week,))
+        else:
+            c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = ? AND (user_id IS NULL) ORDER BY position", (week,))
     rows = c.fetchall()
     if not rows:
         await message.answer("Нет пустых позиций для назначения.")
@@ -807,11 +782,11 @@ async def assign_got_pos(message: Message, state: FSMContext):
         await message.answer("Введите корректный номер позиции (целое число).")
         return
     week = get_week_start()
-    c = get_cursor()
-    if USE_POSTGRES:
-        c.execute("SELECT * FROM weekly_users WHERE week_start = %s AND position = %s", (week, pos))
-    else:
-        c.execute("SELECT * FROM weekly_users WHERE week_start = ? AND position = ?", (week, pos))
+    with get_cursor() as c:
+        if USE_POSTGRES:
+            c.execute("SELECT * FROM weekly_users WHERE week_start = %s AND position = %s", (week, pos))
+        else:
+            c.execute("SELECT * FROM weekly_users WHERE week_start = ? AND position = ?", (week, pos))
     row = c.fetchone()
     if not row:
         await message.answer("Позиции с таким номером нет. Проверьте /missing.")
@@ -823,25 +798,25 @@ async def assign_got_pos(message: Message, state: FSMContext):
         return
     # list available users to choose
     week = get_week_start()
-    c = get_cursor()
-    if USE_POSTGRES:
-        c.execute("""
-            SELECT u.tg_id, u.site_username, u.tg_username
-            FROM users u
-            WHERE u.status='approved' AND u.tg_id NOT IN (
-                SELECT user_id FROM weekly_users WHERE week_start = %s AND user_id IS NOT NULL
-            )
-            ORDER BY u.registered_at
-        """, (week,))
-    else:
-        c.execute("""
-            SELECT u.tg_id, u.site_username, u.tg_username
-            FROM users u
-            WHERE u.status='approved' AND u.tg_id NOT IN (
-                SELECT user_id FROM weekly_users WHERE week_start = ? AND user_id IS NOT NULL
-            )
-            ORDER BY u.registered_at
-        """, (week,))
+    with get_cursor() as c:
+        if USE_POSTGRES:
+            c.execute("""
+                SELECT u.tg_id, u.site_username, u.tg_username
+                FROM users u
+                WHERE u.status='approved' AND u.tg_id NOT IN (
+                    SELECT user_id FROM weekly_users WHERE week_start = %s AND user_id IS NOT NULL
+                )
+                ORDER BY u.registered_at
+            """, (week,))
+        else:
+            c.execute("""
+                SELECT u.tg_id, u.site_username, u.tg_username
+                FROM users u
+                WHERE u.status='approved' AND u.tg_id NOT IN (
+                    SELECT user_id FROM weekly_users WHERE week_start = ? AND user_id IS NOT NULL
+                )
+                ORDER BY u.registered_at
+            """, (week,))
     users = c.fetchall()
     if not users:
         await message.answer("Нет свободных зарегистрированных для назначения.")
@@ -874,11 +849,11 @@ async def cb_assign_choose(callback: types.CallbackQuery):
     pos = int(parts[1])
     tg_id = int(parts[2])
     week = get_week_start()
-    c = get_cursor()
-    if USE_POSTGRES:
-        c.execute("SELECT * FROM users WHERE tg_id = %s", (tg_id,))
-    else:
-        c.execute("SELECT * FROM users WHERE tg_id = ?", (tg_id,))
+    with get_cursor() as c:)
+        if USE_POSTGRES:
+            c.execute("SELECT * FROM users WHERE tg_id = %s", (tg_id,))
+        else:
+            c.execute("SELECT * FROM users WHERE tg_id = ?", (tg_id,))
     u = c.fetchone()
     if not u:
         await callback.answer("Пользователь не найден")
@@ -887,7 +862,6 @@ async def cb_assign_choose(callback: types.CallbackQuery):
         c.execute("UPDATE weekly_users SET user_id = %s WHERE week_start = %s AND position = %s", (tg_id, week, pos))
     else:
         c.execute("UPDATE weekly_users SET user_id = ? WHERE week_start = ? AND position = ?", (tg_id, week, pos))
-    conn.commit()
     try:
         await callback.message.edit_text(f"✅ Назначено: <code>{esc(u['site_username'])}</code> → позиция #{esc(pos)}")
     except:
@@ -911,8 +885,8 @@ async def givepromo_site_entered(message: Message, state: FSMContext):
         await state.clear()
         return
     tg_id = user["tg_id"]
-    c = get_cursor()
-    c.execute("SELECT id, code, total_uses, used FROM promocodes ORDER BY added_at ASC, id ASC")
+    with get_cursor() as c:
+        c.execute("SELECT id, code, total_uses, used FROM promocodes ORDER BY added_at ASC, id ASC")
     promos = c.fetchall()
     available_codes = []
     for p in promos:
@@ -965,8 +939,8 @@ async def givepromo_qty(message: Message, state: FSMContext):
         return
     data = await state.get_data()
     tg_id = int(data.get("give_tg_id"))
-    c = get_cursor()
-    c.execute("SELECT id, code, total_uses, used FROM promocodes ORDER BY added_at ASC, id ASC")
+    with get_cursor() as c:
+        c.execute("SELECT id, code, total_uses, used FROM promocodes ORDER BY added_at ASC, id ASC")
     promos = c.fetchall()
     choices = []
     for p in promos:
@@ -999,25 +973,25 @@ async def givepromo_codes_entered(message: Message, state: FSMContext):
     if len(set(parts)) != len(parts):
         await message.answer("Ошибка: нельзя выдавать одинаковые промо одному пользователю.")
         return
-    c = get_cursor()
-    valid = []
-    for code in parts:
-        if USE_POSTGRES:
-            c.execute("SELECT id, total_uses, used FROM promocodes WHERE code = %s", (code,))
-        else:
-            c.execute("SELECT id, total_uses, used FROM promocodes WHERE code = ?", (code,))
-        p = c.fetchone()
-        if not p:
-            await message.answer(f"Код <code>{esc(code)}</code> не найден в базе.")
-            return
-        rem = p["total_uses"] - p["used"]
-        if rem <= 0:
-            await message.answer(f"Код <code>{esc(code)}</code> исчерпан.")
-            return
-        if user_already_has_code(tg_id, code):
-            await message.answer(f"Пользователь уже получал код <code>{esc(code)}</code> ранее.")
-            return
-        valid.append((p["id"], code))
+    with get_cursor() as c:
+        valid = []
+        for code in parts:
+            if USE_POSTGRES:
+                c.execute("SELECT id, total_uses, used FROM promocodes WHERE code = %s", (code,))
+            else:
+                c.execute("SELECT id, total_uses, used FROM promocodes WHERE code = ?", (code,))
+            p = c.fetchone()
+            if not p:
+                await message.answer(f"Код <code>{esc(code)}</code> не найден в базе.")
+                return
+            rem = p["total_uses"] - p["used"]
+            if rem <= 0:
+                await message.answer(f"Код <code>{esc(code)}</code> исчерпан.")
+                return
+            if user_already_has_code(tg_id, code):
+                await message.answer(f"Пользователь уже получал код <code>{esc(code)}</code> ранее.")
+                return
+            valid.append((p["id"], code))
     # commit issuance
     issued_codes = []
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -1051,24 +1025,24 @@ async def cmd_finduser_start(message: Message, state: FSMContext):
 @dp.message(FindUserState.waiting_for_input)
 async def finduser_handle(message: Message, state: FSMContext):
     term = message.text.strip()
-    c = get_cursor()
-    user = None
-    if term.isdigit():
-        if USE_POSTGRES:
-            c.execute("SELECT * FROM users WHERE tg_id = %s", (int(term),))
+    with get_cursor() as c:
+        user = None
+        if term.isdigit():
+            if USE_POSTGRES:
+                c.execute("SELECT * FROM users WHERE tg_id = %s", (int(term),))
+            else:
+                c.execute("SELECT * FROM users WHERE tg_id = ?", (int(term),))
+            user = c.fetchone()
         else:
-            c.execute("SELECT * FROM users WHERE tg_id = ?", (int(term),))
-        user = c.fetchone()
-    else:
-        if USE_POSTGRES:
-            c.execute("SELECT * FROM users WHERE site_username = %s", (term,))
-        else:
-            c.execute("SELECT * FROM users WHERE site_username = ?", (term,))
-        user = c.fetchone()
-    if not user:
-        await message.answer("Пользователь не найден.")
-        await state.clear()
-        return
+            if USE_POSTGRES:
+                c.execute("SELECT * FROM users WHERE site_username = %s", (term,))
+            else:
+                c.execute("SELECT * FROM users WHERE site_username = ?", (term,))
+            user = c.fetchone()
+        if not user:
+            await message.answer("Пользователь не найден.")
+            await state.clear()
+            return
     site_v = esc(user["site_username"])
     tid = user["tg_id"]
     tg_v = esc(user["tg_username"])
@@ -1098,11 +1072,11 @@ async def cb_find_assign(callback: types.CallbackQuery):
         return
     tid = int(callback.data.split(":",1)[1])
     week = get_week_start()
-    c = get_cursor()
-    if USE_POSTGRES:
-        c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = %s AND (user_id IS NULL) ORDER BY position", (week,))
-    else:
-        c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = ? AND (user_id IS NULL OR) ORDER BY position", (week,))
+    with get_cursor() as c:
+        if USE_POSTGRES:
+            c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = %s AND (user_id IS NULL) ORDER BY position", (week,))
+        else:
+            c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = ? AND (user_id IS NULL OR) ORDER BY position", (week,))
     rows = c.fetchall()
     if not rows:
         await callback.message.edit_text("Нет пустых позиций для назначения.")
@@ -1121,12 +1095,12 @@ async def cb_find_assign(callback: types.CallbackQuery):
 async def cmd_promostats(message: Message):
     if message.from_user.id not in ADMIN_IDS:
         return
-    c = get_cursor()
-    # distinct added_at values
-    if USE_POSTGRES:
-        c.execute("SELECT DISTINCT added_at FROM promocodes ORDER BY added_at DESC LIMIT 50")
-    else:
-        c.execute("SELECT DISTINCT added_at FROM promocodes ORDER BY added_at DESC LIMIT 50")
+    with get_cursor() as c:
+        # distinct added_at values
+        if USE_POSTGRES:
+            c.execute("SELECT DISTINCT added_at FROM promocodes ORDER BY added_at DESC LIMIT 50")
+        else:
+            c.execute("SELECT DISTINCT added_at FROM promocodes ORDER BY added_at DESC LIMIT 50")
     rows = c.fetchall()
     if not rows:
         await message.answer("Промокоды не добавлены.")
@@ -1145,11 +1119,11 @@ async def cb_promostats_show(callback: types.CallbackQuery):
         await callback.answer("Нет прав")
         return
     ts_str = callback.data.split(":",1)[1]
-    c = get_cursor()
-    if USE_POSTGRES:
-        c.execute("SELECT id, code, total_uses, used FROM promocodes WHERE added_at = %s ORDER BY id ASC", (ts_str,))
-    else:
-        c.execute("SELECT id, code, total_uses, used FROM promocodes WHERE added_at = ? ORDER BY id ASC", (ts_str,))
+    with get_cursor() as c:
+        if USE_POSTGRES:
+            c.execute("SELECT id, code, total_uses, used FROM promocodes WHERE added_at = %s ORDER BY id ASC", (ts_str,))
+        else:
+            c.execute("SELECT id, code, total_uses, used FROM promocodes WHERE added_at = ? ORDER BY id ASC", (ts_str,))
     rows = c.fetchall()
     if not rows:
         await callback.message.answer("Промокоды для этой загрузки не найдены.")
@@ -1185,19 +1159,18 @@ async def cb_promostats_delete_confirm(callback: types.CallbackQuery):
         await callback.answer("Нет прав")
         return
     ts_str = callback.data.split(":",1)[1]
-    c = get_cursor()
-    try:
-        if USE_POSTGRES:
-            c.execute("DELETE FROM promocodes WHERE added_at = %s", (ts_str,))
-        else:
-            c.execute("DELETE FROM promocodes WHERE added_at = ?", (ts_str,))
-        conn.commit()
-        await callback.message.answer(f"Удаление промокодов, загруженных {ts_str}, выполнено.")
-    except Exception as exc:
-        if USE_POSTGRES:
-            conn.rollback()
-        await callback.message.answer(f"Ошибка при удалении: {exc}")
-    await callback.answer()
+    with get_cursor() as c:
+        try:
+            if USE_POSTGRES:
+                c.execute("DELETE FROM promocodes WHERE added_at = %s", (ts_str,))
+            else:
+                c.execute("DELETE FROM promocodes WHERE added_at = ?", (ts_str,))
+            await callback.message.answer(f"Удаление промокодов, загруженных {ts_str}, выполнено.")
+        except Exception as exc:
+            if USE_POSTGRES:
+                conn.rollback()
+            await callback.message.answer(f"Ошибка при удалении: {exc}")
+        await callback.answer()
 
 @dp.callback_query(lambda c: c.data == "noop")
 async def cb_noop(callback: types.CallbackQuery):
@@ -1225,24 +1198,23 @@ async def cb_report_delete_confirm(callback: types.CallbackQuery):
         await callback.answer("Нет прав")
         return
     d = callback.data.split(":",1)[1]
-    c = get_cursor()
-    try:
-        if USE_POSTGRES:
-            c.execute("DELETE FROM distribution WHERE DATE(given_at) = %s", (d,))
-        else:
-            c.execute("DELETE FROM distribution WHERE DATE(given_at) = ?", (d,))
-        conn.commit()
-        await callback.message.answer(f"Удаление записей выдач за {d} выполнено.")
-    except Exception as exc:
-        if USE_POSTGRES:
-            conn.rollback()
-        await callback.message.answer(f"Ошибка при удалении: {exc}")
-    await callback.answer()
-
-    try:
+    with get_cursor() as c:
+        try:
+            if USE_POSTGRES:
+                c.execute("DELETE FROM distribution WHERE DATE(given_at) = %s", (d,))
+            else:
+                c.execute("DELETE FROM distribution WHERE DATE(given_at) = ?", (d,))
+            await callback.message.answer(f"Удаление записей выдач за {d} выполнено.")
+        except Exception as exc:
+            if USE_POSTGRES:
+                conn.rollback()
+            await callback.message.answer(f"Ошибка при удалении: {exc}")
         await callback.answer()
-    except:
-        pass
+
+        try:
+            await callback.answer()
+        except:
+            pass
 
 # ---------------- DISTRIBUTION ALGORITHM (same approach as earlier) ----------------
 
@@ -1252,14 +1224,13 @@ def compute_allocation_ordered() -> Dict[int, List[str]]:
     { position_number (from weekly_users.position): [code1, code2, ...] }
     Распределение считается по числу позиций в weekly_users для текущей недели.
     """
-    c = get_cursor()
     week = get_week_start()
-
-    # 1) получаем список позиций (ordered by position)
-    if USE_POSTGRES:
-        c.execute("SELECT position, user_id FROM weekly_users WHERE week_start = %s ORDER BY position", (week,))
-    else:
-        c.execute("SELECT position, user_id FROM weekly_users WHERE week_start = ? ORDER BY position", (week,))
+    with get_cursor() as c:
+        # 1) получаем список позиций (ordered by position)
+        if USE_POSTGRES:
+            c.execute("SELECT position, user_id FROM weekly_users WHERE week_start = %s ORDER BY position", (week,))
+        else:
+            c.execute("SELECT position, user_id FROM weekly_users WHERE week_start = ? ORDER BY position", (week,))
     positions = c.fetchall()
     if not positions:
         return {}
@@ -1356,8 +1327,8 @@ async def cmd_distribute_now(message: Message):
     if message.from_user.id not in ADMIN_IDS:
         return
     week = get_week_start()
-    c = get_cursor()
-    c.execute("SELECT MAX(week_start) AS last_list FROM weekly_users")
+    with get_cursor() as c:
+        c.execute("SELECT MAX(week_start) AS last_list FROM weekly_users")
     last_list_row = c.fetchone()
     last_list = last_list_row["last_list"] if last_list_row else None
     c.execute("SELECT MAX(added_at) AS last_promos FROM promocodes")
@@ -1385,12 +1356,12 @@ async def cb_manual_plan(callback: types.CallbackQuery):
         return
     out = ["📊 План распределения (ручная раздача):"]
     idx = 1
-    c = get_cursor()
     week = get_week_start()
-    if USE_POSTGRES:
-        c.execute("SELECT position, site_username, user_id FROM weekly_users WHERE week_start = %s ORDER BY position", (week,))
-    else:
-        c.execute("SELECT position, site_username, user_id FROM weekly_users WHERE week_start = ? ORDER BY position", (week,))
+    with get_cursor() as c:
+        if USE_POSTGRES:
+            c.execute("SELECT position, site_username, user_id FROM weekly_users WHERE week_start = %s ORDER BY position", (week,))
+        else:
+            c.execute("SELECT position, site_username, user_id FROM weekly_users WHERE week_start = ? ORDER BY position", (week,))
     positions = c.fetchall()
     for pos in positions:
         uid = pos["user_id"]
@@ -1426,8 +1397,8 @@ async def cb_manual_confirm(callback: types.CallbackQuery):
     await callback.message.edit_text("Запускаю ручную раздачу...")
     await asyncio.sleep(0.5)
     week = get_week_start()
-    c = get_cursor()
-    c.execute("SELECT id, code, total_uses, used FROM promocodes ORDER BY added_at ASC, id ASC")
+    with get_cursor() as c:
+        c.execute("SELECT id, code, total_uses, used FROM promocodes ORDER BY added_at ASC, id ASC")
     promos = c.fetchall()
     rem_map = {p["code"]:(p["id"], p["total_uses"] - p["used"]) for p in promos}
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -1473,7 +1444,6 @@ async def cb_manual_confirm(callback: types.CallbackQuery):
                 await bot.send_message(tg_id, header + "\n".join(promo_lines) + footer)
             except:
                 pass
-    conn.commit()
     db_set_setting("last_distribution_date", str(get_week_start()))
     await callback.message.edit_text("Ручная раздача выполнена.")
     await callback.answer()
@@ -1510,46 +1480,46 @@ async def cb_report_plan(callback: types.CallbackQuery):
         await callback.answer("План недоступен (пусто).")
         return
     out = ["📊 План раздачи:\n"]
-    c = get_cursor()
     week = get_week_start()
-    if USE_POSTGRES:
-        c.execute("SELECT position, site_username, user_id FROM weekly_users WHERE week_start = %s ORDER BY position", (week,))
-    else:
-        c.execute("SELECT position, site_username, user_id FROM weekly_users WHERE week_start = ? ORDER BY position", (week,))
-    positions = c.fetchall()
-    idx = 1
-    for pos in positions:
-        uid = pos["user_id"]
-        if not uid:
-            out.append(f"{idx}. {esc(pos['site_username'])} — ❌ пусто")
+    with get_cursor() as c:
+        if USE_POSTGRES:
+            c.execute("SELECT position, site_username, user_id FROM weekly_users WHERE week_start = %s ORDER BY position", (week,))
         else:
-            codes = plan.get(pos['position'], [])
-            if not codes:
-                out.append(f"{idx}. {esc(pos['site_username'])} — ❌ не получит промо")
+            c.execute("SELECT position, site_username, user_id FROM weekly_users WHERE week_start = ? ORDER BY position", (week,))
+        positions = c.fetchall()
+        idx = 1
+        for pos in positions:
+            uid = pos["user_id"]
+            if not uid:
+                out.append(f"{idx}. {esc(pos['site_username'])} — ❌ пусто")
             else:
-                out.append(f"{idx}. {esc(pos['site_username'])}")
-                for i, code in enumerate(codes, start=1):
-                    out.append(f"   ├─ <code>{esc(code)}</code>")
-                suffix = "✅ (полный комплект)" if len(codes) >= 3 else f"⚠️ ({len(codes)} шт.)"
-                out.append(f"   {suffix}")
-        idx += 1
-        if len(out) > 400:
-            out.append("... (обрезано)")
-            break
-    await callback.message.answer("\n".join(out))
-    await callback.answer()
+                codes = plan.get(pos['position'], [])
+                if not codes:
+                    out.append(f"{idx}. {esc(pos['site_username'])} — ❌ не получит промо")
+                else:
+                    out.append(f"{idx}. {esc(pos['site_username'])}")
+                    for i, code in enumerate(codes, start=1):
+                        out.append(f"   ├─ <code>{esc(code)}</code>")
+                    suffix = "✅ (полный комплект)" if len(codes) >= 3 else f"⚠️ ({len(codes)} шт.)"
+                    out.append(f"   {suffix}")
+            idx += 1
+            if len(out) > 400:
+                out.append("... (обрезано)")
+                break
+        await callback.message.answer("\n".join(out))
+        await callback.answer()
 
 @dp.callback_query(lambda c: c.data == "report_results")
 async def cb_report_results(callback: types.CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         await callback.answer("Нет прав")
         return
-    c = get_cursor()
-    # выбираем уникальные даты выдач (date part)
-    if USE_POSTGRES:
-        c.execute("SELECT DISTINCT DATE(given_at) AS d FROM distribution ORDER BY d DESC LIMIT 50")
-    else:
-        c.execute("SELECT DISTINCT DATE(given_at) AS d FROM distribution ORDER BY d DESC LIMIT 50")
+    with get_cursor() as c:
+        # выбираем уникальные даты выдач (date part)
+        if USE_POSTGRES:
+            c.execute("SELECT DISTINCT DATE(given_at) AS d FROM distribution ORDER BY d DESC LIMIT 50")
+        else:
+            c.execute("SELECT DISTINCT DATE(given_at) AS d FROM distribution ORDER BY d DESC LIMIT 50")
     rows = c.fetchall()
     if not rows:
         await callback.message.answer("Выдач ещё не было.")
@@ -1569,28 +1539,28 @@ async def cb_report_results_show(callback: types.CallbackQuery):
         await callback.answer("Нет прав")
         return
     d = callback.data.split(":",1)[1]
-    c = get_cursor()
-    if USE_POSTGRES:
-        c.execute("""
-            SELECT d.given_at, COALESCE(u.site_username,'-') AS site, COALESCE(u.tg_username,'-') AS tg, d.code, d.source
-            FROM distribution d
-            LEFT JOIN users u ON u.tg_id = d.user_id
-            WHERE DATE(d.given_at) = %s
-            ORDER BY d.given_at DESC
-        """, (d,))
-    else:
-        c.execute("""
-            SELECT d.given_at, COALESCE(u.site_username,'-') AS site, COALESCE(u.tg_username,'-') AS tg, d.code, d.source
-            FROM distribution d
-            LEFT JOIN users u ON u.tg_id = d.user_id
-            WHERE DATE(d.given_at) = ?
-            ORDER BY d.given_at DESC
-        """, (d,))
-    rows = c.fetchall()
-    if not rows:
-        await callback.message.answer("За выбранную дату выдач не найдено.")
-        await callback.answer()
-        return
+    with get_cursor() as c:
+        if USE_POSTGRES:
+            c.execute("""
+                SELECT d.given_at, COALESCE(u.site_username,'-') AS site, COALESCE(u.tg_username,'-') AS tg, d.code, d.source
+                FROM distribution d
+                LEFT JOIN users u ON u.tg_id = d.user_id
+                WHERE DATE(d.given_at) = %s
+                ORDER BY d.given_at DESC
+            """, (d,))
+        else:
+            c.execute("""
+                SELECT d.given_at, COALESCE(u.site_username,'-') AS site, COALESCE(u.tg_username,'-') AS tg, d.code, d.source
+                FROM distribution d
+                LEFT JOIN users u ON u.tg_id = d.user_id
+                WHERE DATE(d.given_at) = ?
+                ORDER BY d.given_at DESC
+            """, (d,))
+        rows = c.fetchall()
+        if not rows:
+            await callback.message.answer("За выбранную дату выдач не найдено.")
+            await callback.answer()
+            return
 
     parts = [f"📝 Итоги раздачи за {d}:\n"]
     grouped = {}
