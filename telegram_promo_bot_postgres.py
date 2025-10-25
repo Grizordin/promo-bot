@@ -89,6 +89,7 @@ if DATABASE_URL:
         cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
         try:
             yield cur
+            conn.commit()
         except Exception as e:
             conn.rollback()
             print(f"[DB] ❌ Query failed: {e}")
@@ -259,13 +260,18 @@ def get_week_start() -> date:
     days_since_sunday = (weekday + 1) % 7
     return today - timedelta(days=days_since_sunday)
 
-def find_user_by_site(site_username: str):
-    with get_cursor() as c:
-        if USE_POSTGRES:
-            c.execute("SELECT * FROM users WHERE site_username = %s", (site_username,))
-        else:
-            c.execute("SELECT * FROM users WHERE site_username = ?", (site_username,))
-        return c.fetchone()
+def find_user_by_site(site_username: str, c=None):
+    if c is None:
+        with get_cursor() as c2:
+            return _find_user_by_site_inner(site_username, c2)
+    return _find_user_by_site_inner(site_username, c)
+
+def _find_user_by_site_inner(site_username, c):
+    if USE_POSTGRES:
+        c.execute("SELECT * FROM users WHERE site_username = %s", (site_username,))
+    else:
+        c.execute("SELECT * FROM users WHERE site_username = ?", (site_username,))
+    return c.fetchone()
 
 def find_user_by_tgid(tg_id: int):
     with get_cursor() as c:
@@ -275,13 +281,16 @@ def find_user_by_tgid(tg_id: int):
             c.execute("SELECT * FROM users WHERE tg_id = ?", (tg_id,))
         return c.fetchone()
 
-def user_already_has_code(tg_id: int, code: str) -> bool:
-    with get_cursor() as c:
-        if USE_POSTGRES:
-            c.execute("SELECT 1 FROM distribution WHERE user_id = %s AND code = %s", (tg_id, code))
-        else:
-            c.execute("SELECT 1 FROM distribution WHERE user_id = ? AND code = ?", (tg_id, code))
-        return c.fetchone() is not None
+def user_already_has_code(tg_id: int, code: str, c=None) -> bool:
+    if c is None:
+        with get_cursor() as c2:
+            return user_already_has_code(tg_id, code, c2)
+
+    if USE_POSTGRES:
+        c.execute("SELECT 1 FROM distribution WHERE user_id = %s AND code = %s", (tg_id, code))
+    else:
+        c.execute("SELECT 1 FROM distribution WHERE user_id = ? AND code = ?", (tg_id, code))
+    return c.fetchone() is not None
 
 def add_promocodes(codes: List[str], total_uses: int):
     with get_cursor() as c:
