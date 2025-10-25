@@ -887,7 +887,7 @@ async def givepromo_site_entered(message: Message, state: FSMContext):
     tg_id = user["tg_id"]
     with get_cursor() as c:
         c.execute("SELECT id, code, total_uses, used FROM promocodes ORDER BY added_at ASC, id ASC")
-    promos = c.fetchall()
+        promos = c.fetchall()
     available_codes = []
     for p in promos:
         rem = p["total_uses"] - p["used"]
@@ -941,7 +941,7 @@ async def givepromo_qty(message: Message, state: FSMContext):
     tg_id = int(data.get("give_tg_id"))
     with get_cursor() as c:
         c.execute("SELECT id, code, total_uses, used FROM promocodes ORDER BY added_at ASC, id ASC")
-    promos = c.fetchall()
+        promos = c.fetchall()
     choices = []
     for p in promos:
         rem = p["total_uses"] - p["used"]
@@ -1083,7 +1083,7 @@ async def cb_find_assign(callback: types.CallbackQuery):
             c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = %s AND (user_id IS NULL) ORDER BY position", (week,))
         else:
             c.execute("SELECT position, site_username FROM weekly_users WHERE week_start = ? AND user_id IS NULL ORDER BY position", (week,))
-    rows = c.fetchall()
+        rows = c.fetchall()
     if not rows:
         await callback.message.edit_text("Нет пустых позиций для назначения.")
         return
@@ -1130,7 +1130,7 @@ async def cb_promostats_show(callback: types.CallbackQuery):
             c.execute("SELECT id, code, total_uses, used FROM promocodes WHERE added_at = %s ORDER BY id ASC", (ts_str,))
         else:
             c.execute("SELECT id, code, total_uses, used FROM promocodes WHERE added_at = ? ORDER BY id ASC", (ts_str,))
-    rows = c.fetchall()
+        rows = c.fetchall()
     if not rows:
         await callback.message.answer("Промокоды для этой загрузки не найдены.")
         await callback.answer()
@@ -1364,7 +1364,7 @@ async def cb_manual_plan(callback: types.CallbackQuery):
             c.execute("SELECT position, site_username, user_id FROM weekly_users WHERE week_start = %s ORDER BY position", (week,))
         else:
             c.execute("SELECT position, site_username, user_id FROM weekly_users WHERE week_start = ? ORDER BY position", (week,))
-    positions = c.fetchall()
+        positions = c.fetchall()
     for pos in positions:
         uid = pos["user_id"]
         if not uid:
@@ -1401,7 +1401,7 @@ async def cb_manual_confirm(callback: types.CallbackQuery):
     week = get_week_start()
     with get_cursor() as c:
         c.execute("SELECT id, code, total_uses, used FROM promocodes ORDER BY added_at ASC, id ASC")
-    promos = c.fetchall()
+        promos = c.fetchall()
     rem_map = {p["code"]:(p["id"], p["total_uses"] - p["used"]) for p in promos}
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -1522,7 +1522,7 @@ async def cb_report_results(callback: types.CallbackQuery):
             c.execute("SELECT DISTINCT DATE(given_at) AS d FROM distribution ORDER BY d DESC LIMIT 50")
         else:
             c.execute("SELECT DISTINCT DATE(given_at) AS d FROM distribution ORDER BY d DESC LIMIT 50")
-    rows = c.fetchall()
+        rows = c.fetchall()
     if not rows:
         await callback.message.answer("Выдач ещё не было.")
         await callback.answer()
