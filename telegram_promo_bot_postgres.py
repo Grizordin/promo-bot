@@ -1391,61 +1391,81 @@ async def cb_manual_confirm(callback: types.CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         await callback.answer("Нет прав")
         return
+
     plan = compute_allocation_ordered()
     if not plan:
         await callback.message.edit_text("Раздача не может быть выполнена (пустой план).")
         await callback.answer()
         return
+
     await callback.message.edit_text("Запускаю ручную раздачу...")
     await asyncio.sleep(0.5)
     week = get_week_start()
-    with get_cursor() as c:
-        c.execute("SELECT id, code, total_uses, used FROM promocodes ORDER BY added_at ASC, id ASC")
-        promos = c.fetchall()
-    rem_map = {p["code"]:(p["id"], p["total_uses"] - p["used"]) for p in promos}
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-    for pos_number, codes in plan.items():
-        # get user_id for this position
-        if USE_POSTGRES:
-            c.execute("SELECT user_id FROM weekly_users WHERE week_start = %s AND position = %s", (week, pos_number))
-        else:
-            c.execute("SELECT user_id FROM weekly_users WHERE week_start = ? AND position = ?", (week, pos_number))
+    with get_cursor() as c:
+        # загружаем все промо
+        c.execute("SELECT id, code, total_uses, used FROM promocodes ORDER BY added_at ASC, id ASC")
+        promos = c.fetchall()
+
+        rem_map = {p["code"]: (p["id"], p["total_uses"] - p["used"]) for p in promos}
+
+        for pos_number, codes in plan.items():
+            if USE_POSTGRES:
+                c.execute(
+                    "SELECT user_id FROM weekly_users WHERE week_start = %s AND position = %s",
+                    (week, pos_number)
+                )
+            else:
+                c.execute(
+                    "SELECT user_id FROM weekly_users WHERE week_start = ? AND position = ?",
+                    (week, pos_number)
+                )
+
             row = c.fetchone()
-        if not row or not row.get("user_id"):
-            continue
-        tg_id = row["user_id"]
-        issued = []
-        for code in codes:
-            pid, rem = rem_map.get(code, (None,0))
-            if pid is None or rem <= 0:
+            if not row or not row.get("user_id"):
                 continue
-            if user_already_has_code(tg_id, code):
-                continue
-            try:
-                if USE_POSTGRES:
-                    c.execute("INSERT INTO distribution (user_id, promo_id, code, count, source, given_at) VALUES (%s, %s, %s, %s, %s, %s)", (tg_id, pid, code, 1, "manual", now))
-                    c.execute("UPDATE promocodes SET used = used + 1 WHERE id = %s", (pid,))
-                else:
-                    c.execute("INSERT INTO distribution (user_id, promo_id, code, count, source, given_at) VALUES (?, ?, ?, ?, ?, ?)", (tg_id, pid, code, 1, "manual", now))
-                    c.execute("UPDATE promocodes SET used = used + 1 WHERE id = ?", (pid,))
-                issued.append(code)
-                rem_map[code] = (pid, rem_map.get(code, (pid,0))[1] - 1)
-            except Exception as exc:
+            tg_id = row["user_id"]
+
+            issued = []
+            for code in codes:
+                pid, rem = rem_map.get(code, (None, 0))
+                if pid is None or rem <= 0:
+                    continue
+                if user_already_has_code(tg_id, code):
+                    continue
+
                 try:
                     if USE_POSTGRES:
-                        conn.rollback()
+                        c.execute(
+                            "INSERT INTO distribution (user_id, promo_id, code, count, source, given_at) "
+                            "VALUES (%s, %s, %s, %s, %s, %s)",
+                            (tg_id, pid, code, 1, "manual", now)
+                        )
+                        c.execute("UPDATE promocodes SET used = used + 1 WHERE id = %s", (pid,))
+                    else:
+                        c.execute(
+                            "INSERT INTO distribution (user_id, promo_id, code, count, source, given_at) "
+                            "VALUES (?, ?, ?, ?, ?, ?)",
+                            (tg_id, pid, code, 1, "manual", now)
+                        )
+                        c.execute("UPDATE promocodes SET used = used + 1 WHERE id = ?", (pid,))
+
+                    issued.append(code)
+                    rem_map[code] = (pid, rem - 1)
+
+                except Exception:
+                    continue
+
+            if issued:
+                try:
+                    header = "Привет, твой промокод за недельный топ 🎉🎉🎉\n1.5к камней\n\n"
+                    promo_lines = [f"{i+1}. <code>{esc(c)}</code>" for i, c in enumerate(issued)]
+                    footer = "\n\n👉 <a href=\"https://animestars.org/promo_codes\">animestars.org</a>\n👉 <a href=\"https://asstars.tv/promo_codes\">asstars.tv</a>"
+                    await bot.send_message(tg_id, header + "\n".join(promo_lines) + footer)
                 except:
                     pass
-                continue
-        if issued:
-            try:
-                header = "Привет, твой промокод за недельный топ 🎉🎉🎉\n1.5к камней\n\n"
-                promo_lines = [f"{i+1}. <code>{esc(c)}</code>" for i,c in enumerate(issued)]
-                footer = "\n\n👉 <a href=\"https://animestars.org/promo_codes\">animestars.org</a>\n👉 <a href=\"https://asstars.tv/promo_codes\">asstars.tv</a>"
-                await bot.send_message(tg_id, header + "\n".join(promo_lines) + footer)
-            except:
-                pass
+
     db_set_setting("last_distribution_date", str(get_week_start()))
     await callback.message.edit_text("Ручная раздача выполнена.")
     await callback.answer()
