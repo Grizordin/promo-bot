@@ -83,20 +83,45 @@ if DATABASE_URL:
         - берёт соединение из пула
         - создаёт курсор
         - автоматически делает commit/rollback
-        - возвращает соединение в пул
+        - безопасно восстанавливает соединение при разрыве
         """
-        conn = get_connection()
-        cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        global db_pool
+        conn = None
+        cur = None
         try:
+            conn = get_connection()
+            cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
             yield cur
             conn.commit()
+        except (psycopg2.InterfaceError, psycopg2.OperationalError) as e:
+            # Соединение умерло — пересоздаём пул
+            print(f"[DB] ⚠️ Connection lost: {e}")
+            if conn:
+                try:
+                    conn.close()
+                except:
+                    pass
+            init_db_pool()  # пересоздаём пул заново
+            raise  # пробрасываем ошибку вверх (чтобы можно было перезапросить)
         except Exception as e:
-            conn.rollback()
+            if conn:
+                try:
+                    conn.rollback()
+                except:
+                    pass
             print(f"[DB] ❌ Query failed: {e}")
             raise
         finally:
-            cur.close()
-            release_connection(conn)
+            if cur:
+                try:
+                    cur.close()
+                except:
+                    pass
+            if conn:
+                try:
+                    release_connection(conn)
+                except:
+                    pass
 
     # ---------------- Создание таблиц ----------------
     init_db_pool()
