@@ -327,6 +327,21 @@ class GivePromoState(StatesGroup):
 class FindUserState(StatesGroup):
     waiting_for_input = State()
 
+# ---------------- UTILS ----------------
+async def send_long_message(bot, chat_id, text, reply_markup=None, chunk_size=4000):
+    """Отправляет длинное сообщение по частям, чтобы не превышать лимит Telegram."""
+    lines = text.split("\n")
+    chunk = ""
+    for line in lines:
+        # Если добавление следующей строки превысит лимит — отправляем предыдущий кусок
+        if len(chunk) + len(line) + 1 > chunk_size:
+            await bot.send_message(chat_id, chunk)
+            chunk = ""
+        chunk += line + "\n"
+    # Отправляем оставшийся кусок, если есть
+    if chunk:
+        await bot.send_message(chat_id, chunk, reply_markup=reply_markup)
+
 # ---------------- COMMANDS: /start (registration flow) ----------------
 @dp.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
@@ -1537,7 +1552,7 @@ async def cb_report_plan(callback: types.CallbackQuery):
             if len(out) > 400:
                 out.append("... (обрезано)")
                 break
-        await callback.message.answer("\n".join(out))
+        await send_long_message(bot, callback.message.chat.id, "\n".join(out))
         await callback.answer()
 
 @dp.callback_query(lambda c: c.data == "report_results")
