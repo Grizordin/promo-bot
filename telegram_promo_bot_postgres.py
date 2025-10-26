@@ -54,14 +54,23 @@ if DATABASE_URL:
             except Exception as e:
                 print(f"[DB] ❌ Failed to init pool: {e}. Retrying in 5 seconds...")
                 time.sleep(5)
-
+    
     def get_connection():
         """Получает соединение из пула"""
         global db_pool
         if db_pool is None:
             init_db_pool()
         try:
-            return db_pool.getconn()
+            conn = db_pool.getconn()
+            # Проверим, живо ли соединение
+            try:
+                with conn.cursor() as test_cur:
+                    test_cur.execute("SELECT 1;")
+            except Exception:
+                print("[DB] ⚠️ Connection invalid, reinitializing pool...")
+                init_db_pool()
+                conn = db_pool.getconn()
+            return conn
         except Exception as e:
             print(f"[DB] ⚠️ Failed to get connection: {e}. Reinitializing pool...")
             init_db_pool()
@@ -79,13 +88,12 @@ if DATABASE_URL:
     @contextmanager
     def get_cursor():
         """
-        Контекстный менеджер, который:
-        - берёт соединение из пула
-        - создаёт курсор
-        - автоматически делает commit/rollback
-        - безопасно восстанавливает соединение при разрыве
+        Контекстный менеджер:
+        - Берёт соединение из пула
+        - Проверяет соединение (SELECT 1)
+        - Автоматически делает commit/rollback
+        - При разрыве пересоздаёт пул и повторяет попытку 1 раз
         """
-        global db_pool
         conn = None
         cur = None
         try:
@@ -94,15 +102,18 @@ if DATABASE_URL:
             yield cur
             conn.commit()
         except (psycopg2.InterfaceError, psycopg2.OperationalError) as e:
-            # Соединение умерло — пересоздаём пул
-            print(f"[DB] ⚠️ Connection lost: {e}")
-            if conn:
-                try:
-                    conn.close()
-                except:
-                    pass
-            init_db_pool()  # пересоздаём пул заново
-            raise  # пробрасываем ошибку вверх (чтобы можно было перезапросить)
+            print(f"[DB] ⚠️ Lost connection during query: {e}. Reinitializing pool and retrying...")
+            try:
+                init_db_pool()
+                conn = get_connection()
+                cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                yield cur  # повторная попытка
+                conn.commit()
+            except Exception as e2:
+                print(f"[DB] ❌ Retry failed: {e2}")
+                if conn:
+                    conn.rollback()
+                raise
         except Exception as e:
             if conn:
                 try:
