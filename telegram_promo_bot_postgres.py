@@ -1593,6 +1593,7 @@ async def cb_report_delete_confirm(callback: types.CallbackQuery):
             pass
 
 # ---------------- DISTRIBUTION ALGORITHM (with top + personal limits) ----------------
+from typing import Dict, List, Union
 
 def compute_allocation_ordered() -> Dict[Union[int, str], List[str]]:
     """
@@ -1606,9 +1607,19 @@ def compute_allocation_ordered() -> Dict[Union[int, str], List[str]]:
     with get_cursor() as c:
         # 1) Список позиций текущей недели (берём site_username)
         if USE_POSTGRES:
-            c.execute("SELECT position, user_id, site_username FROM weekly_users WHERE week_start = %s ORDER BY position", (week,))
+            c.execute("""
+                SELECT position, user_id, site_username
+                FROM weekly_users
+                WHERE week_start = %s
+                ORDER BY position
+            """, (week,))
         else:
-            c.execute("SELECT position, user_id, site_username FROM weekly_users WHERE week_start = ? ORDER BY position", (week,))
+            c.execute("""
+                SELECT position, user_id, site_username
+                FROM weekly_users
+                WHERE week_start = ?
+                ORDER BY position
+            """, (week,))
         positions = c.fetchall()
         if not positions:
             return {}
@@ -1622,6 +1633,7 @@ def compute_allocation_ordered() -> Dict[Union[int, str], List[str]]:
         """)
         promos = c.fetchall()
 
+    # Подготовка списка промокодов
     promo_iter = [
         {"id": p["id"], "code": p["code"], "remaining": max(0, p["total_uses"] - p["used"])}
         for p in promos if (p["total_uses"] - p["used"]) > 0
@@ -1643,8 +1655,8 @@ def compute_allocation_ordered() -> Dict[Union[int, str], List[str]]:
         top_limit = 15
 
     with get_cursor() as c:
-        c.execute("SELECT site, limit_count FROM promo_limits ORDER BY site ASC")
-        personal_limits = {r["site"]: r["limit_count"] for r in c.fetchall()}
+        c.execute("SELECT site_username, limit_count FROM promo_limits ORDER BY site_username ASC")
+        personal_limits = {r["site_username"]: r["limit_count"] for r in c.fetchall()}
 
     # --- (B) Карта site -> индекс позиции ---
     site_to_index = {p["site_username"]: i for i, p in enumerate(positions) if p.get("site_username")}
@@ -1653,8 +1665,8 @@ def compute_allocation_ordered() -> Dict[Union[int, str], List[str]]:
     # --- (C) Топы ---
     for i in range(min(top_limit, len(positions))):
         give = min(3, distributable)
-        allocated[i] = give
-        distributable -= give
+        allocated[i] = min(3, give)
+        distributable -= allocated[i]
         if distributable <= 0:
             break
 
@@ -1662,7 +1674,11 @@ def compute_allocation_ordered() -> Dict[Union[int, str], List[str]]:
     for site, limit in personal_limits.items():
         if site in site_to_index:
             idx = site_to_index[site]
-            need = max(0, limit - allocated[idx])
+            already = allocated[idx]
+            # не превышаем максимум 3
+            need = max(0, min(limit, 3) - already)
+            if need <= 0:
+                continue
             give = min(need, distributable)
             allocated[idx] += give
             distributable -= give
@@ -1672,6 +1688,7 @@ def compute_allocation_ordered() -> Dict[Union[int, str], List[str]]:
 
     # --- (E) Персональные лимиты для тех, кого НЕТ в списке ---
     extras = []
+    site_map = {}
     with get_cursor() as c:
         if personal_limits:
             sites = tuple(personal_limits.keys())
@@ -1680,12 +1697,12 @@ def compute_allocation_ordered() -> Dict[Union[int, str], List[str]]:
             else:
                 placeholders = ",".join("?" for _ in sites)
                 c.execute(f"SELECT tg_id, site_username FROM users WHERE site_username IN ({placeholders})", sites)
-            users_rows = c.fetchall()
-            site_map = {r["site_username"]: r["tg_id"] for r in users_rows}
+            for r in c.fetchall():
+                site_map[r["site_username"]] = r["tg_id"]
 
     for site, limit in personal_limits.items():
         if site not in applied_personal_sites and site in site_map:
-            give = min(limit, distributable)
+            give = min(limit, distributable, 3)
             if give > 0:
                 extras.append((site, site_map[site], give))
                 distributable -= give
@@ -1696,38 +1713,67 @@ def compute_allocation_ordered() -> Dict[Union[int, str], List[str]]:
     # --- (F) Остальные получают по 1 ---
     if distributable > 0:
         for i in range(len(allocated)):
-            if allocated[i] == 0 and distributable > 0:
+            if distributable <= 0:
+                break
+            if allocated[i] == 0:
                 allocated[i] = 1
                 distributable -= 1
 
-    # --- (G) Оставшиеся — +1 сверху списка ---
+    # --- (G) Оставшиеся — +1 сверху списка (не более 3 каждому) ---
     idx = 0
     while distributable > 0 and len(allocated) > 0:
-        allocated[idx % len(allocated)] += 1
-        distributable -= 1
+        if allocated[idx % len(allocated)] < 3:
+            allocated[idx % len(allocated)] += 1
+            distributable -= 1
         idx += 1
 
-    # --- (H) Назначаем коды ---
+    # --- (H) Назначаем коды (без дубликатов одному пользователю) ---
     promo_idx = 0
     for pos_idx, cnt in enumerate(allocated):
         if cnt <= 0:
             continue
         codes = []
+        used_codes_local = set()
         for _ in range(cnt):
-            while promo_iter[promo_idx % len(promo_iter)]["remaining"] <= 0:
-                promo_idx += 1
-            promo_iter[promo_idx % len(promo_iter)]["remaining"] -= 1
-            codes.append(promo_iter[promo_idx % len(promo_iter)]["code"])
+            found = False
+            for offset in range(len(promo_iter)):
+                idx = (promo_idx + offset) % len(promo_iter)
+                if promo_iter[idx]["remaining"] <= 0:
+                    continue
+                cand = promo_iter[idx]["code"]
+                if cand in used_codes_local:
+                    continue
+                promo_iter[idx]["remaining"] -= 1
+                codes.append(cand)
+                used_codes_local.add(cand)
+                promo_idx = idx
+                found = True
+                break
+            if not found:
+                break
         distribution_plan[positions[pos_idx]["position"]] = codes
 
     # --- (I) Добавляем коды для пользователей вне weekly (extras) ---
     for site, tg_id, limit in extras:
         codes = []
+        used_codes_local = set()
         for _ in range(limit):
-            while promo_iter[promo_idx % len(promo_iter)]["remaining"] <= 0:
-                promo_idx += 1
-            promo_iter[promo_idx % len(promo_iter)]["remaining"] -= 1
-            codes.append(promo_iter[promo_idx % len(promo_iter)]["code"])
+            found = False
+            for offset in range(len(promo_iter)):
+                idx = (promo_idx + offset) % len(promo_iter)
+                if promo_iter[idx]["remaining"] <= 0:
+                    continue
+                cand = promo_iter[idx]["code"]
+                if cand in used_codes_local:
+                    continue
+                promo_iter[idx]["remaining"] -= 1
+                codes.append(cand)
+                used_codes_local.add(cand)
+                promo_idx = idx
+                found = True
+                break
+            if not found:
+                break
         distribution_plan[f"site:{site}"] = codes
 
     return distribution_plan
