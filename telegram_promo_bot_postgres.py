@@ -14,6 +14,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from datetime import datetime, timedelta, timezone, date
 from aiohttp import web
+import re
 
 # ---------------- CONFIG ----------------
 # Token: keep fallback to original value so local usage doesn't break; you can set BOT_TOKEN in env on Render
@@ -23,6 +24,7 @@ try:
     ADMIN_IDS = [int(x.strip()) for x in admin_ids_str.split(",") if x.strip()]
 except ValueError:
     ADMIN_IDS = []
+PROMO_PATTERN = re.compile(r"^[A-Z0-9]{4}-[A-Z0-9]{4}$")
 
 # ---------------- DB SETUP (Postgres if DATABASE_URL present, otherwise fallback to SQLite) ----------------
 USE_POSTGRES = False
@@ -579,54 +581,87 @@ async def cb_reject(callback: types.CallbackQuery):
     await callback.answer("Отклонён")
 
 # ---------------- ADD PROMO (3 promo + uses) ----------------
-@dp.message(Command("addpromo"))
-async def cmd_addpromo_start(message: Message, state: FSMContext):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    await state.clear()
-    await message.answer("Добавление промо — шаг 1/4. Введите код первого промо:")
-    await state.set_state(AddPromoState.waiting_for_code1)
-
 @dp.message(AddPromoState.waiting_for_code1)
 async def addpromo_code1(message: Message, state: FSMContext):
-    await state.update_data(code1=message.text.strip())
-    await message.answer("Введите код второго промо:")
+    code = message.text.strip().upper()
+    if not PROMO_PATTERN.fullmatch(code):
+        await message.answer("❌ Неверный формат. Пример правильного кода: <code>L725-8T33</code>")
+        return
+    await state.update_data(code1=code)
+    await message.answer("Добавление промо — шаг 2/4. Введите код второго промо:")
     await state.set_state(AddPromoState.waiting_for_code2)
 
+# --- Шаг 2: второй код ---
 @dp.message(AddPromoState.waiting_for_code2)
 async def addpromo_code2(message: Message, state: FSMContext):
-    await state.update_data(code2=message.text.strip())
-    await message.answer("Введите код третьего промо:")
+    code = message.text.strip().upper()
+    if not PROMO_PATTERN.fullmatch(code):
+        await message.answer("❌ Неверный формат. Пример правильного кода: <code>L725-8T33</code>")
+        return
+
+    data = await state.get_data()
+    if code == data.get("code1"):
+        await message.answer("❌ Этот код уже был введён ранее. Введите другой промокод.")
+        return
+
+    await state.update_data(code2=code)
+    await message.answer("Добавление промо — шаг 3/4. Введите код третьего промо:")
     await state.set_state(AddPromoState.waiting_for_code3)
 
+# --- Шаг 3: третий код ---
 @dp.message(AddPromoState.waiting_for_code3)
 async def addpromo_code3(message: Message, state: FSMContext):
-    await state.update_data(code3=message.text.strip())
-    await message.answer("Введите общее количество использований (целое число):")
+    code = message.text.strip().upper()
+    if not PROMO_PATTERN.fullmatch(code):
+        await message.answer("❌ Неверный формат. Пример правильного кода: <code>L725-8T33</code>")
+        return
+
+    data = await state.get_data()
+    if code in [data.get("code1"), data.get("code2")]:
+        await message.answer("❌ Этот код уже был введён ранее. Введите другой промокод.")
+        return
+
+    await state.update_data(code3=code)
+    await message.answer("Добавление промо — шаг 4/4. Введите общее количество использований (целое число):")
     await state.set_state(AddPromoState.waiting_for_uses)
 
+# --- Шаг 4: количество использований ---
 @dp.message(AddPromoState.waiting_for_uses)
 async def addpromo_uses(message: Message, state: FSMContext):
     try:
         uses = int(message.text.strip())
-        if uses < 0:
+        if uses <= 0:
             raise ValueError()
     except:
         await message.answer("Введите положительное целое число.")
         return
-    await state.update_data(uses=uses)
 
     data = await state.get_data()
     codes = [data.get("code1"), data.get("code2"), data.get("code3")]
-    uses = int(data.get("uses"))
-    add_promocodes(codes, uses)
-    lines = ["✅ Промокоды добавлены:"]
+    codes = [c.strip().upper() for c in codes if c and c.strip()]
+
+    # Проверка на уникальность (дополнительно)
+    if len(set(codes)) < 3:
+        await message.answer("❌ Промокоды не должны повторяться.")
+        return
+
+    # Добавление в БД
+    try:
+        add_promocodes(codes, uses)
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при добавлении промокодов:\n<code>{esc(str(e))}</code>")
+        return
+
+    # Сообщение об успехе
+    lines = ["✅ Промокоды успешно добавлены:"]
     for i, ccode in enumerate(codes, start=1):
         lines.append(f"{i}. <code>{esc(ccode)}</code>")
     lines.append(f"Всего использований: <code>{esc(uses)}</code>")
+
     await message.answer("\n".join(lines))
     await state.clear()
-    # show promostats
+
+    # Показать статистику
     await cmd_promostats(message)
 
 # ---------------- SETUSERS (upload .txt or paste) ----------------
@@ -1056,7 +1091,6 @@ async def givepromo_codes_entered(message: Message, state: FSMContext):
     issued_codes = []
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     with get_cursor() as c:
-        valid = []
         for pid, code in valid:
             if USE_POSTGRES:
                 c.execute("INSERT INTO distribution (user_id, promo_id, code, count, source, given_at) VALUES (%s, %s, %s, %s, %s, %s)", (tg_id, pid, code, 1, give_type, now))
