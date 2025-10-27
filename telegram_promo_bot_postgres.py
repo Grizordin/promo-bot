@@ -1592,17 +1592,18 @@ async def cb_report_delete_confirm(callback: types.CallbackQuery):
         except:
             pass
 
-# ---------------- DISTRIBUTION ALGORITHM (same approach as earlier) ----------------
+# ---------------- DISTRIBUTION ALGORITHM (with top + personal limits) ----------------
 
 def compute_allocation_ordered() -> Dict[int, List[str]]:
     """
-    Возвращает распределение по позициям weekly_users:
-    { position_number (from weekly_users.position): [code1, code2, ...] }
-    Распределение считается по числу позиций в weekly_users для текущей недели.
+    Распределение промокодов с учетом:
+    1) Топ пользователей (из promo_config.top_limit)
+    2) Персональных лимитов (promo_limits)
+    3) Остальной логики — 1 промо всем, потом +1 сверху списка
     """
     week = get_week_start()
     with get_cursor() as c:
-        # 1) получаем список позиций (ordered by position)
+        # 1) Список позиций текущей недели
         if USE_POSTGRES:
             c.execute("SELECT position, user_id FROM weekly_users WHERE week_start = %s ORDER BY position", (week,))
         else:
@@ -1613,7 +1614,7 @@ def compute_allocation_ordered() -> Dict[int, List[str]]:
 
         n_positions = len(positions)
 
-        # 2) берем только последние загруженные промо
+        # 2) Получаем свежие промокоды
         if USE_POSTGRES:
             c.execute("""
                 SELECT id, code, total_uses, used
@@ -1629,7 +1630,11 @@ def compute_allocation_ordered() -> Dict[int, List[str]]:
                 ORDER BY id ASC
             """)
         promos = c.fetchall()
-    promo_iter = [{"id": p["id"], "code": p["code"], "remaining": max(0, p["total_uses"] - p["used"])} for p in promos if (p["total_uses"] - p["used"]) > 0]
+
+    promo_iter = [
+        {"id": p["id"], "code": p["code"], "remaining": max(0, p["total_uses"] - p["used"])}
+        for p in promos if (p["total_uses"] - p["used"]) > 0
+    ]
     if not promo_iter:
         return {}
 
@@ -1638,26 +1643,71 @@ def compute_allocation_ordered() -> Dict[int, List[str]]:
     if distributable <= 0:
         return {}
 
-    # 3) распределяем количество кодов по позициям
+    # 3) Подготовка данных
+    distribution_plan_by_pos: Dict[int, List[str]] = {}
     allocated = [0] * n_positions
-    # первые 15 позиций получают до 3
-    top_count = min(15, n_positions)
+
+    # --- (A) Получаем лимиты ---
+    try:
+        top_limit = get_top_limit()
+    except Exception:
+        top_limit = 15  # дефолт на случай отсутствия таблицы
+
+    with get_cursor() as c:
+        c.execute("SELECT site, limit_count FROM promo_limits ORDER BY site ASC")
+        personal_limits = {r["site"]: r["limit_count"] for r in c.fetchall()}
+
+    # --- (B) Персональные лимиты ---
+    # Получаем user_id -> site из weekly_users
+    user_site_map = {}
+    with get_cursor() as c:
+        c.execute("SELECT user_id, site FROM users")
+        for r in c.fetchall():
+            user_site_map[r["user_id"]] = r["site"]
+
+    # применяем лимиты независимо от позиции
+    manual_allocations: Dict[int, int] = {}
+    for pos in positions:
+        uid = pos["user_id"]
+        site = user_site_map.get(uid)
+        if not site:
+            continue
+        if site in personal_limits:
+            manual_allocations[pos["position"]] = personal_limits[site]
+
+    # --- (C) Топ пользователей ---
+    top_count = min(top_limit, n_positions)
     for i in range(top_count):
+        pos_num = positions[i]["position"]
+        if pos_num in manual_allocations:
+            continue  # у персонального уже задано
         give = min(3, distributable)
-        allocated[i] += give
+        allocated[i] = give
         distributable -= give
         if distributable <= 0:
             break
 
-    # затем остальные получают по 1 пока есть
+    # --- (D) Применяем персональные лимиты (если промо хватает) ---
+    for pos_num, limit in manual_allocations.items():
+        idx = next((i for i, p in enumerate(positions) if p["position"] == pos_num), None)
+        if idx is None:
+            continue
+        give = min(limit, distributable)
+        allocated[idx] = give
+        distributable -= give
+        if distributable <= 0:
+            break
+
+    # --- (E) Остальные пользователи — по 1 промо ---
     if distributable > 0:
-        for i in range(top_count, n_positions):
+        for i in range(n_positions):
             if distributable <= 0:
                 break
-            allocated[i] += 1
-            distributable -= 1
+            if allocated[i] == 0:  # не трогаем тех, кому уже дали
+                allocated[i] = 1
+                distributable -= 1
 
-    # остаток раздаем round-robin по всем позициям
+    # --- (F) Распределяем оставшиеся — +1 начиная сверху списка ---
     if distributable > 0:
         idx = 0
         while distributable > 0 and n_positions > 0:
@@ -1665,8 +1715,7 @@ def compute_allocation_ordered() -> Dict[int, List[str]]:
             distributable -= 1
             idx += 1
 
-    # 4) сопоставляем коды с позициями
-    distribution_plan_by_pos: Dict[int, List[str]] = {}
+    # --- (G) Присваиваем коды ---
     promo_idx = 0
     for pos_idx, cnt in enumerate(allocated):
         pos_number = positions[pos_idx]["position"]
@@ -1683,7 +1732,6 @@ def compute_allocation_ordered() -> Dict[int, List[str]]:
                 cand = promo_iter[idx]["code"]
                 if cand in used_codes_local:
                     continue
-                # Important: do NOT check user_already_has_code here (we allocate by positions)
                 promo_iter[idx]["remaining"] -= 1
                 codes_for_pos.append(cand)
                 used_codes_local.add(cand)
