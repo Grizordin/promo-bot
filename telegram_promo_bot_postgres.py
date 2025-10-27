@@ -1119,6 +1119,277 @@ async def givepromo_codes_entered(message: Message, state: FSMContext):
     await message.answer("✅ Выдано пользователю:\n" + "\n".join([f"<code>{esc(c)}</code>" for c in issued_codes]))
     await state.clear()
 
+# ---------------- LIMIT SETTINGS (global + per-user) ----------------
+
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+# --- FSM состояния ---
+class LimitState(StatesGroup):
+    waiting_for_new_top = State()
+    waiting_for_new_user_nick = State()
+    waiting_for_new_user_limit = State()
+    waiting_for_select_user = State()
+    waiting_for_edit_limit = State()
+    waiting_for_delete_confirm = State()
+
+
+# --- Инициализация таблиц (вызывается при запуске) ---
+def ensure_limit_tables():
+    with get_cursor() as c:
+        if USE_POSTGRES:
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS promo_config (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                );
+            """)
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS promo_limits (
+                    id SERIAL PRIMARY KEY,
+                    site TEXT UNIQUE,
+                    limit_count INTEGER NOT NULL
+                );
+            """)
+        else:
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS promo_config (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                );
+            """)
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS promo_limits (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    site TEXT UNIQUE,
+                    limit_count INTEGER NOT NULL
+                );
+            """)
+
+
+# --- Получение/установка количества топов ---
+def get_top_limit():
+    with get_cursor() as c:
+        if USE_POSTGRES:
+            c.execute("SELECT value FROM promo_config WHERE key = 'top_limit'")
+        else:
+            c.execute("SELECT value FROM promo_config WHERE key = ?", ("top_limit",))
+        row = c.fetchone()
+        if not row:
+            # если нет значения — создаем по умолчанию
+            if USE_POSTGRES:
+                c.execute("INSERT INTO promo_config (key, value) VALUES ('top_limit', '15')")
+            else:
+                c.execute("INSERT INTO promo_config (key, value) VALUES (?, ?)", ("top_limit", "15"))
+            return 15
+        return int(row["value"])
+
+
+def set_top_limit(new_limit: int):
+    with get_cursor() as c:
+        if USE_POSTGRES:
+            c.execute("""
+                INSERT INTO promo_config (key, value)
+                VALUES ('top_limit', %s)
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+            """, (str(new_limit),))
+        else:
+            c.execute("""
+                INSERT OR REPLACE INTO promo_config (key, value)
+                VALUES (?, ?)
+            """, ("top_limit", str(new_limit)))
+
+
+# --- Работа с персональными лимитами ---
+def get_all_personal_limits():
+    with get_cursor() as c:
+        c.execute("SELECT site, limit_count FROM promo_limits ORDER BY site ASC")
+        return c.fetchall()
+
+
+def set_user_limit(site: str, limit_count: int):
+    with get_cursor() as c:
+        if USE_POSTGRES:
+            c.execute("""
+                INSERT INTO promo_limits (site, limit_count)
+                VALUES (%s, %s)
+                ON CONFLICT (site) DO UPDATE SET limit_count = EXCLUDED.limit_count
+            """, (site, limit_count))
+        else:
+            c.execute("""
+                INSERT OR REPLACE INTO promo_limits (site, limit_count)
+                VALUES (?, ?)
+            """, (site, limit_count))
+
+
+def delete_user_limit(site: str):
+    with get_cursor() as c:
+        if USE_POSTGRES:
+            c.execute("DELETE FROM promo_limits WHERE site = %s", (site,))
+        else:
+            c.execute("DELETE FROM promo_limits WHERE site = ?", (site,))
+
+
+# --- Команда /limit ---
+@dp.message(Command("limit"))
+async def cmd_limit_main(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Количество топов", callback_data="limit:top")],
+        [InlineKeyboardButton(text="👤 Персональные лимиты", callback_data="limit:personal")]
+    ])
+    await message.answer("⚙️ Настройки лимитов промокодов:", reply_markup=kb)
+
+
+# --- Обработка нажатий на основные кнопки ---
+@dp.callback_query(lambda c: c.data and c.data.startswith("limit:"))
+async def cb_limit_main(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет прав")
+        return
+
+    _, section = callback.data.split(":", 1)
+
+    if section == "top":
+        top_count = get_top_limit()
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✏️ Изменить количество", callback_data="limit:edit_top")]
+        ])
+        await callback.message.edit_text(
+            f"3 промокода выдаются топ {top_count} из загружаемого списка.",
+            reply_markup=kb
+        )
+
+    elif section == "personal":
+        limits = get_all_personal_limits()
+        if not limits:
+            txt = "Персональные лимиты отсутствуют."
+        else:
+            lines = [f"{i+1}. {esc(l['site'])} — {l['limit_count']} промокод(а)" for i, l in enumerate(limits)]
+            txt = "\n".join(lines)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="➕ Добавить пользователя", callback_data="limit:add_user")],
+            [InlineKeyboardButton(text="✏️ Изменить пользователя", callback_data="limit:edit_user")]
+        ])
+        await callback.message.edit_text(f"👤 Персональные лимиты:\n\n{txt}", reply_markup=kb)
+
+    elif section == "edit_top":
+        await callback.message.edit_text("Введите новое количество топов (целое число):")
+        await state.set_state(LimitState.waiting_for_new_top)
+
+    elif section == "add_user":
+        await callback.message.edit_text("Введите ник пользователя с сайта, которому установить персональный лимит:")
+        await state.set_state(LimitState.waiting_for_new_user_nick)
+
+    elif section == "edit_user":
+        limits = get_all_personal_limits()
+        if not limits:
+            await callback.answer("Список пуст.")
+            return
+        kb = InlineKeyboardBuilder()
+        for l in limits:
+            kb.button(text=l["site"], callback_data=f"limit:user:{l['site']}")
+        kb.adjust(2)
+        await callback.message.edit_text("Выберите пользователя для редактирования:", reply_markup=kb.as_markup())
+
+    elif section.startswith("user:"):
+        site = section.split(":", 1)[1]
+        with get_cursor() as c:
+            c.execute("SELECT limit_count FROM promo_limits WHERE site = %s" if USE_POSTGRES else "SELECT limit_count FROM promo_limits WHERE site = ?", (site,))
+            row = c.fetchone()
+        if not row:
+            await callback.answer("Не найден.")
+            return
+        limit_count = row["limit_count"]
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✏️ Изменить лимит", callback_data=f"limit:change:{site}")],
+            [InlineKeyboardButton(text="🗑 Удалить", callback_data=f"limit:delete:{site}")]
+        ])
+        await callback.message.edit_text(f"{site} — {limit_count} промокод(а)", reply_markup=kb)
+
+    elif section.startswith("change:"):
+        site = section.split(":", 1)[1]
+        await state.update_data(edit_site=site)
+        await callback.message.edit_text("Введите новый лимит (1–3):")
+        await state.set_state(LimitState.waiting_for_edit_limit)
+
+    elif section.startswith("delete:"):
+        site = section.split(":", 1)[1]
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Подтвердить удаление", callback_data=f"limit:delete_confirm:{site}")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="limit:personal")]
+        ])
+        await callback.message.edit_text(f"Удалить лимит пользователя {site}?", reply_markup=kb)
+
+    elif section.startswith("delete_confirm:"):
+        site = section.split(":", 1)[1]
+        delete_user_limit(site)
+        await callback.message.edit_text(f"✅ Лимит пользователя {site} удалён.")
+        await state.clear()
+
+    await callback.answer()
+
+
+# --- FSM шаги ---
+@dp.message(LimitState.waiting_for_new_top)
+async def limit_new_top_entered(message: Message, state: FSMContext):
+    try:
+        n = int(message.text.strip())
+        if n <= 0:
+            raise ValueError()
+    except:
+        await message.answer("Введите положительное целое число.")
+        return
+    set_top_limit(n)
+    await message.answer(f"✅ Количество топов, получающих 3 промокода, изменено на {n}.")
+    await state.clear()
+
+
+@dp.message(LimitState.waiting_for_new_user_nick)
+async def limit_add_user_nick(message: Message, state: FSMContext):
+    site = message.text.strip()
+    user = find_user_by_site(site)
+    if not user or user["status"] != "approved":
+        await message.answer("Пользователь не найден или не одобрен.")
+        await state.clear()
+        return
+    await state.update_data(add_site=site)
+    await message.answer("Введите лимит (1–3 промокода):")
+    await state.set_state(LimitState.waiting_for_new_user_limit)
+
+
+@dp.message(LimitState.waiting_for_new_user_limit)
+async def limit_add_user_limit(message: Message, state: FSMContext):
+    try:
+        n = int(message.text.strip())
+        if n < 1 or n > 3:
+            raise ValueError()
+    except:
+        await message.answer("Введите число 1, 2 или 3.")
+        return
+    data = await state.get_data()
+    site = data.get("add_site")
+    set_user_limit(site, n)
+    await message.answer(f"✅ Персональный лимит для {site} установлен: {n} промокод(а).")
+    await state.clear()
+
+
+@dp.message(LimitState.waiting_for_edit_limit)
+async def limit_edit_limit_value(message: Message, state: FSMContext):
+    try:
+        n = int(message.text.strip())
+        if n < 1 or n > 3:
+            raise ValueError()
+    except:
+        await message.answer("Введите число 1, 2 или 3.")
+        return
+    data = await state.get_data()
+    site = data.get("edit_site")
+    set_user_limit(site, n)
+    await message.answer(f"✅ Лимит пользователя {site} изменён на {n} промокод(а).")
+    await state.clear()
+
 # ---------------- FINDUSER ----------------
 @dp.message(Command("finduser"))
 async def cmd_finduser_start(message: Message, state: FSMContext):
@@ -1773,6 +2044,7 @@ async def start_webserver():
     print(f"✅ Web server started on port {PORT}")
 
 async def main():
+    ensure_limit_tables()
     # запускаем webserver и polling одновременно
     await asyncio.gather(
         start_webserver(),
