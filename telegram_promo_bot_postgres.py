@@ -2046,6 +2046,7 @@ async def start_webserver():
 
 async def main():
     ensure_limit_tables()
+    await set_commands()
     # запускаем webserver и polling одновременно
     await asyncio.gather(
         start_webserver(),
