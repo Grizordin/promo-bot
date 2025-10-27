@@ -921,7 +921,7 @@ async def assign_got_pos(message: Message, state: FSMContext):
                 )
                 ORDER BY u.registered_at
             """, (week,))
-    users = c.fetchall()
+        users = c.fetchall()
     if not users:
         await message.answer("Нет свободных зарегистрированных для назначения.")
         await state.clear()
