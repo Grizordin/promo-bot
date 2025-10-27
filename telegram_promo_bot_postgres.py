@@ -1661,7 +1661,7 @@ def compute_allocation_ordered() -> Dict[int, List[str]]:
     # Получаем user_id -> site из weekly_users
     user_site_map = {}
     with get_cursor() as c:
-        c.execute("SELECT user_id, site FROM users")
+        c.execute("SELECT id, site FROM users")
         for r in c.fetchall():
             user_site_map[r["user_id"]] = r["site"]
 
