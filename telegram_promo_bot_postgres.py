@@ -581,6 +581,7 @@ async def cb_reject(callback: types.CallbackQuery):
     await callback.answer("Отклонён")
 
 # ---------------- ADD PROMO (3 promo + uses) ----------------
+
 @dp.message(AddPromoState.waiting_for_code1)
 async def addpromo_code1(message: Message, state: FSMContext):
     code = message.text.strip().upper()
