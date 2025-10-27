@@ -2,7 +2,7 @@ import os
 import asyncio
 import html
 from datetime import datetime, timedelta
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Union
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
