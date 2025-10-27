@@ -581,7 +581,15 @@ async def cb_reject(callback: types.CallbackQuery):
     await callback.answer("Отклонён")
 
 # ---------------- ADD PROMO (3 promo + uses) ----------------
-
+# --- Шаг 0: команда /addpromo ---
+@dp.message(Command("addpromo"))
+async def cmd_addpromo_start(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    await state.clear()
+    await message.answer("Добавление промо — шаг 1/4. Введите код первого промо:")
+    await state.set_state(AddPromoState.waiting_for_code1)
+    
 @dp.message(AddPromoState.waiting_for_code1)
 async def addpromo_code1(message: Message, state: FSMContext):
     code = message.text.strip().upper()
