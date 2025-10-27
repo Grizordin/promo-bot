@@ -2007,13 +2007,14 @@ async def set_commands():
     admin_cmds = [
         types.BotCommand(command="pending", description="Заявки на регистрацию"),
         types.BotCommand(command="addpromo", description="Добавить 3 промо (интерактивно)"),
+        types.BotCommand(command="givepromo", description="Выдать промо вручную"),
+        types.BotCommand(command="limit", description="Настройки лимитов промокодов"),
+        types.BotCommand(command="promostats", description="Статистика промо"),
         types.BotCommand(command="setusers", description="Загрузить список недели (.txt)"),
         types.BotCommand(command="missing", description="Пустые позиции недели"),
-        types.BotCommand(command="users", description="Списки пользователей"),
         types.BotCommand(command="assign", description="Назначить пользователя на позицию"),
-        types.BotCommand(command="givepromo", description="Выдать промо вручную"),
+        types.BotCommand(command="users", description="Списки пользователей"),
         types.BotCommand(command="finduser", description="Найти пользователя"),
-        types.BotCommand(command="promostats", description="Статистика промо"),
         types.BotCommand(command="report", description="План / итоги раздачи"),
         types.BotCommand(command="distribute_now", description="Ручная раздача сейчас (подтвердить)")
     ]
