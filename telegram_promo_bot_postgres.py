@@ -1655,8 +1655,8 @@ def compute_allocation_ordered() -> Dict[Union[int, str], List[str]]:
         top_limit = 15
 
     with get_cursor() as c:
-        c.execute("SELECT site_username, limit_count FROM promo_limits ORDER BY site_username ASC")
-        personal_limits = {r["site_username"]: r["limit_count"] for r in c.fetchall()}
+        c.execute("SELECT site, limit_count FROM promo_limits ORDER BY site ASC")
+        personal_limits = {r["site"]: r["limit_count"] for r in c.fetchall()}
 
     # --- (B) Карта site -> индекс позиции ---
     site_to_index = {p["site_username"]: i for i, p in enumerate(positions) if p.get("site_username")}
