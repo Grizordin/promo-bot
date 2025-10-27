@@ -1963,39 +1963,54 @@ async def cb_report_plan(callback: types.CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         await callback.answer("Нет прав")
         return
+
     plan = compute_allocation_ordered()
     if not plan:
         await callback.answer("План недоступен (пусто).")
         return
+
     out = ["📊 План раздачи:\n"]
     week = get_week_start()
+
     with get_cursor() as c:
         if USE_POSTGRES:
             c.execute("SELECT position, site_username, user_id FROM weekly_users WHERE week_start = %s ORDER BY position", (week,))
         else:
             c.execute("SELECT position, site_username, user_id FROM weekly_users WHERE week_start = ? ORDER BY position", (week,))
         positions = c.fetchall()
-        idx = 1
-        for pos in positions:
-            uid = pos["user_id"]
-            if not uid:
-                out.append(f"{idx}. {esc(pos['site_username'])} — ❌ пусто")
+
+    idx = 1
+    for pos in positions:
+        uid = pos["user_id"]
+        if not uid:
+            out.append(f"{idx}. {esc(pos['site_username'])} — ❌ пусто")
+        else:
+            codes = plan.get(pos['position'], [])
+            if not codes:
+                out.append(f"{idx}. {esc(pos['site_username'])} — ❌ не получит промо")
             else:
-                codes = plan.get(pos['position'], [])
-                if not codes:
-                    out.append(f"{idx}. {esc(pos['site_username'])} — ❌ не получит промо")
-                else:
-                    out.append(f"{idx}. {esc(pos['site_username'])}")
-                    for i, code in enumerate(codes, start=1):
-                        out.append(f"   ├─ <code>{esc(code)}</code>")
-                    suffix = "✅ (полный комплект)" if len(codes) >= 3 else f"⚠️ ({len(codes)} шт.)"
-                    out.append(f"   {suffix}")
-            idx += 1
-            if len(out) > 400:
-                out.append("... (обрезано)")
-                break
-        await send_long_message(bot, callback.message.chat.id, "\n".join(out))
-        await callback.answer()
+                out.append(f"{idx}. {esc(pos['site_username'])}")
+                for i, code in enumerate(codes, start=1):
+                    out.append(f"   ├─ <code>{esc(code)}</code>")
+                suffix = "✅ (полный комплект)" if len(codes) >= 3 else f"⚠️ ({len(codes)} шт.)"
+                out.append(f"   {suffix}")
+        idx += 1
+
+    # --- 👇 добавляем пользователей вне weekly_users ---
+    extras = {k: v for k, v in plan.items() if isinstance(k, str) and k.startswith("site:")}
+    if extras:
+        out.append("\n📦 Персональные пользователи вне недельного списка:")
+        for key, codes in extras.items():
+            site = key.split(":", 1)[1]
+            out.append(f"— {esc(site)}")
+            for i, code in enumerate(codes, start=1):
+                out.append(f"   ├─ <code>{esc(code)}</code>")
+            suffix = "✅ (полный комплект)" if len(codes) >= 3 else f"⚠️ ({len(codes)} шт.)"
+            out.append(f"   {suffix}")
+
+    # --- безопасная отправка длинных сообщений ---
+    await send_long_message(bot, callback.message.chat.id, "\n".join(out))
+    await callback.answer()
 
 @dp.callback_query(lambda c: c.data == "report_results")
 async def cb_report_results(callback: types.CallbackQuery):
