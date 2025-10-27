@@ -1593,33 +1593,26 @@ async def cb_report_delete_confirm(callback: types.CallbackQuery):
             pass
 
 # ---------------- DISTRIBUTION ALGORITHM (with top + personal limits) ----------------
-from typing import Dict, List, Union
 
 def compute_allocation_ordered() -> Dict[Union[int, str], List[str]]:
     """
-    Распределение промокодов с учетом:
-    1) Топ пользователей (из promo_config.top_limit)
-    2) Персональных лимитов (promo_limits), включая тех, кто не в weekly_users
-    3) Остальной логики — 1 промо всем, потом +1 сверху списка
+    Исправленная версия распределения с:
+     - нормализацией site (lower) для сравнения
+     - исключением дубликатов (если site в weekly, не добавляем extras)
+     - гарантией max 3 промо на пользователя
+     - предотвращением одинаковых кодов для одного пользователя
+    Возвращает dict ключ = int (position) или "site:xxx" для вне-списка пользователей.
     """
+    MAX_PER_USER = 3
+
     week = get_week_start()
 
     with get_cursor() as c:
         # 1) Список позиций текущей недели (берём site_username)
         if USE_POSTGRES:
-            c.execute("""
-                SELECT position, user_id, site_username
-                FROM weekly_users
-                WHERE week_start = %s
-                ORDER BY position
-            """, (week,))
+            c.execute("SELECT position, user_id, site_username FROM weekly_users WHERE week_start = %s ORDER BY position", (week,))
         else:
-            c.execute("""
-                SELECT position, user_id, site_username
-                FROM weekly_users
-                WHERE week_start = ?
-                ORDER BY position
-            """, (week,))
+            c.execute("SELECT position, user_id, site_username FROM weekly_users WHERE week_start = ? ORDER BY position", (week,))
         positions = c.fetchall()
         if not positions:
             return {}
@@ -1633,7 +1626,7 @@ def compute_allocation_ordered() -> Dict[Union[int, str], List[str]]:
         """)
         promos = c.fetchall()
 
-    # Подготовка списка промокодов
+    # подготовка промо-итератора
     promo_iter = [
         {"id": p["id"], "code": p["code"], "remaining": max(0, p["total_uses"] - p["used"])}
         for p in promos if (p["total_uses"] - p["used"]) > 0
@@ -1646,7 +1639,8 @@ def compute_allocation_ordered() -> Dict[Union[int, str], List[str]]:
         return {}
 
     distribution_plan: Dict[Union[int, str], List[str]] = {}
-    allocated = [0] * len(positions)
+    n_positions = len(positions)
+    allocated = [0] * n_positions  # количество промо для каждой позиции (по индексу в positions)
 
     # --- (A) Лимиты ---
     try:
@@ -1655,80 +1649,106 @@ def compute_allocation_ordered() -> Dict[Union[int, str], List[str]]:
         top_limit = 15
 
     with get_cursor() as c:
+        # promo_limits хранит столбцы: site, limit_count
         c.execute("SELECT site, limit_count FROM promo_limits ORDER BY site ASC")
-        personal_limits = {r["site"]: r["limit_count"] for r in c.fetchall()}
+        rows = c.fetchall()
+        # нормализуем ключи в lower() для надежного сопоставления
+        personal_limits = { (r["site"].lower() if r["site"] else r["site"]): r["limit_count"] for r in rows }
 
-    # --- (B) Карта site -> индекс позиции ---
-    site_to_index = {p["site_username"]: i for i, p in enumerate(positions) if p.get("site_username")}
-    applied_personal_sites = set()
+    # --- (B) Карта site -> индекс позиции (используем нормализацию) ---
+    site_to_index = {}
+    for idx, p in enumerate(positions):
+        s = p.get("site_username")
+        if s:
+            site_to_index[s.lower()] = idx
 
-    # --- (C) Топы ---
-    for i in range(min(top_limit, len(positions))):
-        give = min(3, distributable)
-        allocated[i] = min(3, give)
-        distributable -= allocated[i]
+    applied_personal_sites = set()  # normalized site keys, которые уже обработаны
+
+    # --- (C) Топы: даём до 3 первым top_limit позициям ---
+    for i in range(min(top_limit, n_positions)):
+        give = min(MAX_PER_USER, distributable)
+        allocated[i] = give
+        distributable -= give
         if distributable <= 0:
             break
 
-    # --- (D) Персональные лимиты для тех, кто В списке ---
-    for site, limit in personal_limits.items():
-        if site in site_to_index:
-            idx = site_to_index[site]
+    # --- (D) Персональные лимиты для тех, кто В списке (увеличиваем до лимита, не выше MAX_PER_USER) ---
+    for site_norm, limit in personal_limits.items():
+        if site_norm in site_to_index:
+            idx = site_to_index[site_norm]
             already = allocated[idx]
-            # не превышаем максимум 3
-            need = max(0, min(limit, 3) - already)
-            if need <= 0:
-                continue
-            give = min(need, distributable)
-            allocated[idx] += give
-            distributable -= give
-            applied_personal_sites.add(site)
-            if distributable <= 0:
-                break
-
-    # --- (E) Персональные лимиты для тех, кого НЕТ в списке ---
-    extras = []
-    site_map = {}
-    with get_cursor() as c:
-        if personal_limits:
-            sites = tuple(personal_limits.keys())
-            if USE_POSTGRES:
-                c.execute("SELECT tg_id, site_username FROM users WHERE site_username = ANY(%s)", (list(sites),))
-            else:
-                placeholders = ",".join("?" for _ in sites)
-                c.execute(f"SELECT tg_id, site_username FROM users WHERE site_username IN ({placeholders})", sites)
-            for r in c.fetchall():
-                site_map[r["site_username"]] = r["tg_id"]
-
-    for site, limit in personal_limits.items():
-        if site not in applied_personal_sites and site in site_map:
-            give = min(limit, distributable, 3)
-            if give > 0:
-                extras.append((site, site_map[site], give))
+            desired = min(limit, MAX_PER_USER)
+            need = max(0, desired - already)
+            if need > 0 and distributable > 0:
+                give = min(need, distributable)
+                allocated[idx] += give
                 distributable -= give
-                applied_personal_sites.add(site)
+            applied_personal_sites.add(site_norm)
             if distributable <= 0:
                 break
 
-    # --- (F) Остальные получают по 1 ---
+    # --- (E) Персональные лимиты для тех, кого НЕТ в списке (extras) ---
+    extras: List[Tuple[str, Union[int,None], int]] = []  # (site_original, tg_id or None, give_count)
+    site_map = {}
+    if personal_limits:
+        with get_cursor() as c:
+            sites = list(personal_limits.keys())
+            if USE_POSTGRES:
+                # передаём список в ANY(%s) как array
+                c.execute("SELECT site_username, tg_id FROM users WHERE LOWER(site_username) = ANY(%s)", (sites,))
+                # Note: если ваш driver/pg не поддерживает этот синтаксис с lower/any, можно использовать IN и list
+            else:
+                # sqlite: используем IN (?,?,...)
+                placeholders = ",".join("?" for _ in sites)
+                c.execute(f"SELECT site_username, tg_id FROM users")
+                # we'll build site_map from fetched rows
+            for r in c.fetchall():
+                key = (r["site_username"].lower() if r.get("site_username") else r.get("site_username"))
+                site_map[key] = r.get("tg_id")
+
+    # собираем extras для тех site, которые не в weekly (и не уже применены)
+    for site_norm, limit in personal_limits.items():
+        if site_norm in applied_personal_sites:
+            continue
+        # не добавляем в extras, если этот site всё же присутствует в weekly map (доп. безопасность)
+        if site_norm in site_to_index:
+            applied_personal_sites.add(site_norm)
+            continue
+        tg = site_map.get(site_norm)  # может быть None
+        give = min(limit, distributable, MAX_PER_USER)
+        if give <= 0:
+            continue
+        extras.append((site_norm, tg, give))
+        distributable -= give
+        applied_personal_sites.add(site_norm)
+        if distributable <= 0:
+            break
+
+    # --- (F) Остальные получают по 1 (только если у них ещё 0, и не превышая MAX_PER_USER) ---
     if distributable > 0:
-        for i in range(len(allocated)):
+        for i in range(n_positions):
             if distributable <= 0:
                 break
             if allocated[i] == 0:
                 allocated[i] = 1
                 distributable -= 1
 
-    # --- (G) Оставшиеся — +1 сверху списка (не более 3 каждому) ---
-    idx = 0
-    while distributable > 0 and len(allocated) > 0:
-        if allocated[idx % len(allocated)] < 3:
-            allocated[idx % len(allocated)] += 1
-            distributable -= 1
-        idx += 1
+    # --- (G) Оставшиеся — +1 сверху списка, но не больше MAX_PER_USER у каждого ---
+    if distributable > 0 and n_positions > 0:
+        idx = 0
+        while distributable > 0:
+            pos = idx % n_positions
+            if allocated[pos] < MAX_PER_USER:
+                allocated[pos] += 1
+                distributable -= 1
+            idx += 1
+            # защититься от бесконечного цикла
+            if idx > n_positions * (MAX_PER_USER + 2):
+                break
 
-    # --- (H) Назначаем коды (без дубликатов одному пользователю) ---
+    # --- (H) Назначаем коды позициям (без дубликатов одному пользователю) ---
     promo_idx = 0
+    n_promos = len(promo_iter)
     for pos_idx, cnt in enumerate(allocated):
         if cnt <= 0:
             continue
@@ -1736,45 +1756,50 @@ def compute_allocation_ordered() -> Dict[Union[int, str], List[str]]:
         used_codes_local = set()
         for _ in range(cnt):
             found = False
-            for offset in range(len(promo_iter)):
-                idx = (promo_idx + offset) % len(promo_iter)
-                if promo_iter[idx]["remaining"] <= 0:
+            for offset in range(n_promos):
+                i = (promo_idx + offset) % n_promos
+                if promo_iter[i]["remaining"] <= 0:
                     continue
-                cand = promo_iter[idx]["code"]
+                cand = promo_iter[i]["code"]
                 if cand in used_codes_local:
                     continue
-                promo_iter[idx]["remaining"] -= 1
+                # выдали код этому пользователю
+                promo_iter[i]["remaining"] -= 1
                 codes.append(cand)
                 used_codes_local.add(cand)
-                promo_idx = idx
+                promo_idx = i  # начинаем следующий поиск с этого индекса
                 found = True
                 break
             if not found:
                 break
+        # ключ — реальная позиция (int)
         distribution_plan[positions[pos_idx]["position"]] = codes
 
-    # --- (I) Добавляем коды для пользователей вне weekly (extras) ---
-    for site, tg_id, limit in extras:
+    # --- (I) Назначаем коды для extras (вне weekly) ---
+    for site_norm, tg_id, limit in extras:
         codes = []
         used_codes_local = set()
         for _ in range(limit):
             found = False
-            for offset in range(len(promo_iter)):
-                idx = (promo_idx + offset) % len(promo_iter)
-                if promo_iter[idx]["remaining"] <= 0:
+            for offset in range(n_promos):
+                i = (promo_idx + offset) % n_promos
+                if promo_iter[i]["remaining"] <= 0:
                     continue
-                cand = promo_iter[idx]["code"]
+                cand = promo_iter[i]["code"]
                 if cand in used_codes_local:
                     continue
-                promo_iter[idx]["remaining"] -= 1
+                promo_iter[i]["remaining"] -= 1
                 codes.append(cand)
                 used_codes_local.add(cand)
-                promo_idx = idx
+                promo_idx = i
                 found = True
                 break
             if not found:
                 break
-        distribution_plan[f"site:{site}"] = codes
+        # возвращаем ключ как site:original (используем оригинный case возможно)
+        # нам нужно вернуть удобочитаемый ключ — восстановим из personal_limits rows:
+        # personal_limits keys были нормализованы; для отображения используем site_norm as-is
+        distribution_plan[f"site:{site_norm}"] = codes
 
     return distribution_plan
 
