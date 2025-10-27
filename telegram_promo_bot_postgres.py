@@ -1594,41 +1594,32 @@ async def cb_report_delete_confirm(callback: types.CallbackQuery):
 
 # ---------------- DISTRIBUTION ALGORITHM (with top + personal limits) ----------------
 
-def compute_allocation_ordered() -> Dict[int, List[str]]:
+def compute_allocation_ordered() -> Dict[Union[int, str], List[str]]:
     """
     Распределение промокодов с учетом:
     1) Топ пользователей (из promo_config.top_limit)
-    2) Персональных лимитов (promo_limits)
+    2) Персональных лимитов (promo_limits), включая тех, кто не в weekly_users
     3) Остальной логики — 1 промо всем, потом +1 сверху списка
     """
     week = get_week_start()
+
     with get_cursor() as c:
-        # 1) Список позиций текущей недели
+        # 1) Список позиций текущей недели (берём site_username)
         if USE_POSTGRES:
-            c.execute("SELECT position, user_id FROM weekly_users WHERE week_start = %s ORDER BY position", (week,))
+            c.execute("SELECT position, user_id, site_username FROM weekly_users WHERE week_start = %s ORDER BY position", (week,))
         else:
-            c.execute("SELECT position, user_id FROM weekly_users WHERE week_start = ? ORDER BY position", (week,))
+            c.execute("SELECT position, user_id, site_username FROM weekly_users WHERE week_start = ? ORDER BY position", (week,))
         positions = c.fetchall()
         if not positions:
             return {}
 
-        n_positions = len(positions)
-
-        # 2) Получаем свежие промокоды
-        if USE_POSTGRES:
-            c.execute("""
-                SELECT id, code, total_uses, used
-                FROM promocodes
-                WHERE added_at = (SELECT MAX(added_at) FROM promocodes)
-                ORDER BY id ASC
-            """)
-        else:
-            c.execute("""
-                SELECT id, code, total_uses, used
-                FROM promocodes
-                WHERE added_at = (SELECT MAX(added_at) FROM promocodes)
-                ORDER BY id ASC
-            """)
+        # 2) Последние промокоды
+        c.execute("""
+            SELECT id, code, total_uses, used
+            FROM promocodes
+            WHERE added_at = (SELECT MAX(added_at) FROM promocodes)
+            ORDER BY id ASC
+        """)
         promos = c.fetchall()
 
     promo_iter = [
@@ -1638,112 +1629,108 @@ def compute_allocation_ordered() -> Dict[int, List[str]]:
     if not promo_iter:
         return {}
 
-    total_available = sum(p["remaining"] for p in promo_iter)
-    distributable = total_available
+    distributable = sum(p["remaining"] for p in promo_iter)
     if distributable <= 0:
         return {}
 
-    # 3) Подготовка данных
-    distribution_plan_by_pos: Dict[int, List[str]] = {}
-    allocated = [0] * n_positions
+    distribution_plan: Dict[Union[int, str], List[str]] = {}
+    allocated = [0] * len(positions)
 
-    # --- (A) Получаем лимиты ---
+    # --- (A) Лимиты ---
     try:
         top_limit = get_top_limit()
     except Exception:
-        top_limit = 15  # дефолт на случай отсутствия таблицы
+        top_limit = 15
 
     with get_cursor() as c:
         c.execute("SELECT site, limit_count FROM promo_limits ORDER BY site ASC")
         personal_limits = {r["site"]: r["limit_count"] for r in c.fetchall()}
 
-    # --- (B) Персональные лимиты ---
-    # Получаем user_id -> site из weekly_users
-    user_site_map = {}
-    with get_cursor() as c:
-        c.execute("SELECT id, site_username FROM users")
-        for r in c.fetchall():
-            user_site_map[r["id"]] = r["site_username"]
+    # --- (B) Карта site -> индекс позиции ---
+    site_to_index = {p["site_username"]: i for i, p in enumerate(positions) if p.get("site_username")}
+    applied_personal_sites = set()
 
-    # применяем лимиты независимо от позиции
-    manual_allocations: Dict[int, int] = {}
-    for pos in positions:
-        uid = pos["user_id"]
-        site = user_site_map.get(uid)
-        if not site:
-            continue
-        if site in personal_limits:
-            manual_allocations[pos["position"]] = personal_limits[site]
-
-    # --- (C) Топ пользователей ---
-    top_count = min(top_limit, n_positions)
-    for i in range(top_count):
-        pos_num = positions[i]["position"]
-        if pos_num in manual_allocations:
-            continue  # у персонального уже задано
+    # --- (C) Топы ---
+    for i in range(min(top_limit, len(positions))):
         give = min(3, distributable)
         allocated[i] = give
         distributable -= give
         if distributable <= 0:
             break
 
-    # --- (D) Применяем персональные лимиты (если промо хватает) ---
-    for pos_num, limit in manual_allocations.items():
-        idx = next((i for i, p in enumerate(positions) if p["position"] == pos_num), None)
-        if idx is None:
-            continue
-        give = min(limit, distributable)
-        allocated[idx] = give
-        distributable -= give
-        if distributable <= 0:
-            break
-
-    # --- (E) Остальные пользователи — по 1 промо ---
-    if distributable > 0:
-        for i in range(n_positions):
+    # --- (D) Персональные лимиты для тех, кто В списке ---
+    for site, limit in personal_limits.items():
+        if site in site_to_index:
+            idx = site_to_index[site]
+            need = max(0, limit - allocated[idx])
+            give = min(need, distributable)
+            allocated[idx] += give
+            distributable -= give
+            applied_personal_sites.add(site)
             if distributable <= 0:
                 break
-            if allocated[i] == 0:  # не трогаем тех, кому уже дали
+
+    # --- (E) Персональные лимиты для тех, кого НЕТ в списке ---
+    extras = []
+    with get_cursor() as c:
+        if personal_limits:
+            sites = tuple(personal_limits.keys())
+            if USE_POSTGRES:
+                c.execute("SELECT tg_id, site_username FROM users WHERE site_username = ANY(%s)", (list(sites),))
+            else:
+                placeholders = ",".join("?" for _ in sites)
+                c.execute(f"SELECT tg_id, site_username FROM users WHERE site_username IN ({placeholders})", sites)
+            users_rows = c.fetchall()
+            site_map = {r["site_username"]: r["tg_id"] for r in users_rows}
+
+    for site, limit in personal_limits.items():
+        if site not in applied_personal_sites and site in site_map:
+            give = min(limit, distributable)
+            if give > 0:
+                extras.append((site, site_map[site], give))
+                distributable -= give
+                applied_personal_sites.add(site)
+            if distributable <= 0:
+                break
+
+    # --- (F) Остальные получают по 1 ---
+    if distributable > 0:
+        for i in range(len(allocated)):
+            if allocated[i] == 0 and distributable > 0:
                 allocated[i] = 1
                 distributable -= 1
 
-    # --- (F) Распределяем оставшиеся — +1 начиная сверху списка ---
-    if distributable > 0:
-        idx = 0
-        while distributable > 0 and n_positions > 0:
-            allocated[idx % n_positions] += 1
-            distributable -= 1
-            idx += 1
+    # --- (G) Оставшиеся — +1 сверху списка ---
+    idx = 0
+    while distributable > 0 and len(allocated) > 0:
+        allocated[idx % len(allocated)] += 1
+        distributable -= 1
+        idx += 1
 
-    # --- (G) Присваиваем коды ---
+    # --- (H) Назначаем коды ---
     promo_idx = 0
     for pos_idx, cnt in enumerate(allocated):
-        pos_number = positions[pos_idx]["position"]
         if cnt <= 0:
             continue
-        codes_for_pos = []
-        used_codes_local = set()
+        codes = []
         for _ in range(cnt):
-            found = False
-            for offset in range(len(promo_iter)):
-                idx = (promo_idx + offset) % len(promo_iter)
-                if promo_iter[idx]["remaining"] <= 0:
-                    continue
-                cand = promo_iter[idx]["code"]
-                if cand in used_codes_local:
-                    continue
-                promo_iter[idx]["remaining"] -= 1
-                codes_for_pos.append(cand)
-                used_codes_local.add(cand)
-                promo_idx = idx
-                found = True
-                break
-            if not found:
-                break
-        if codes_for_pos:
-            distribution_plan_by_pos[pos_number] = codes_for_pos
+            while promo_iter[promo_idx % len(promo_iter)]["remaining"] <= 0:
+                promo_idx += 1
+            promo_iter[promo_idx % len(promo_iter)]["remaining"] -= 1
+            codes.append(promo_iter[promo_idx % len(promo_iter)]["code"])
+        distribution_plan[positions[pos_idx]["position"]] = codes
 
-    return distribution_plan_by_pos
+    # --- (I) Добавляем коды для пользователей вне weekly (extras) ---
+    for site, tg_id, limit in extras:
+        codes = []
+        for _ in range(limit):
+            while promo_iter[promo_idx % len(promo_iter)]["remaining"] <= 0:
+                promo_idx += 1
+            promo_iter[promo_idx % len(promo_iter)]["remaining"] -= 1
+            codes.append(promo_iter[promo_idx % len(promo_iter)]["code"])
+        distribution_plan[f"site:{site}"] = codes
+
+    return distribution_plan
 
 # ---------------- MANUAL DISTRIBUTE (/distribute_now) ----------------
 @dp.message(Command("distribute_now"))
@@ -1832,22 +1819,33 @@ async def cb_manual_confirm(callback: types.CallbackQuery):
 
         rem_map = {p["code"]: (p["id"], p["total_uses"] - p["used"]) for p in promos}
 
-        for pos_number, codes in plan.items():
-            if USE_POSTGRES:
-                c.execute(
-                    "SELECT user_id FROM weekly_users WHERE week_start = %s AND position = %s",
-                    (week, pos_number)
-                )
-            else:
-                c.execute(
-                    "SELECT user_id FROM weekly_users WHERE week_start = ? AND position = ?",
-                    (week, pos_number)
-                )
+    # <<< вот здесь отступ на уровень меньше — цикл вне with >>>
+    for pos_key, codes in plan.items():
+        tg_id = None
 
-            row = c.fetchone()
-            if not row or not row.get("user_id"):
+        with get_cursor() as c:
+            if isinstance(pos_key, int):
+                # обычная позиция
+                if USE_POSTGRES:
+                    c.execute("SELECT user_id FROM weekly_users WHERE week_start = %s AND position = %s", (week, pos_key))
+                else:
+                    c.execute("SELECT user_id FROM weekly_users WHERE week_start = ? AND position = ?", (week, pos_key))
+                row = c.fetchone()
+                if row and row.get("user_id"):
+                    tg_id = row["user_id"]
+
+            elif isinstance(pos_key, str) and pos_key.startswith("site:"):
+                site = pos_key.split(":", 1)[1]
+                if USE_POSTGRES:
+                    c.execute("SELECT tg_id FROM users WHERE site_username = %s", (site,))
+                else:
+                    c.execute("SELECT tg_id FROM users WHERE site_username = ?", (site,))
+                row = c.fetchone()
+                if row and row.get("tg_id"):
+                    tg_id = row["tg_id"]
+
+            if not tg_id:
                 continue
-            tg_id = row["user_id"]
 
             issued = []
             for code in codes:
@@ -1879,14 +1877,14 @@ async def cb_manual_confirm(callback: types.CallbackQuery):
                 except Exception:
                     continue
 
-            if issued:
-                try:
-                    header = "Привет, твой промокод за недельный топ 🎉🎉🎉\n1.5к камней\n\n"
-                    promo_lines = [f"{i+1}. <code>{esc(c)}</code>" for i, c in enumerate(issued)]
-                    footer = "\n\n👉 <a href=\"https://animestars.org/promo_codes\">animestars.org</a>\n👉 <a href=\"https://asstars.tv/promo_codes\">asstars.tv</a>"
-                    await bot.send_message(tg_id, header + "\n".join(promo_lines) + footer)
-                except:
-                    pass
+        if issued:
+            try:
+                header = "Привет, твой промокод за недельный топ 🎉🎉🎉\n1.5к камней\n\n"
+                promo_lines = [f"{i+1}. <code>{esc(c)}</code>" for i, c in enumerate(issued)]
+                footer = "\n\n👉 <a href=\"https://animestars.org/promo_codes\">animestars.org</a>\n👉 <a href=\"https://asstars.tv/promo_codes\">asstars.tv</a>"
+                await bot.send_message(tg_id, header + "\n".join(promo_lines) + footer)
+            except:
+                pass
 
     db_set_setting("last_distribution_date", str(get_week_start()))
     await callback.message.edit_text("Ручная раздача выполнена.")
