@@ -1963,43 +1963,67 @@ async def cb_report_plan(callback: types.CallbackQuery):
     out = ["📊 План раздачи:\n"]
     week = get_week_start()
 
+    # --- 1️⃣ Берём позиции из weekly_users ---
     with get_cursor() as c:
         if USE_POSTGRES:
-            c.execute("SELECT position, site_username, user_id FROM weekly_users WHERE week_start = %s ORDER BY position", (week,))
+            c.execute("""
+                SELECT position, site_username, user_id 
+                FROM weekly_users 
+                WHERE week_start = %s 
+                ORDER BY position
+            """, (week,))
         else:
-            c.execute("SELECT position, site_username, user_id FROM weekly_users WHERE week_start = ? ORDER BY position", (week,))
+            c.execute("""
+                SELECT position, site_username, user_id 
+                FROM weekly_users 
+                WHERE week_start = ? 
+                ORDER BY position
+            """, (week,))
         positions = c.fetchall()
 
+    # --- 2️⃣ Формируем обычную часть плана (weekly) ---
     idx = 1
     for pos in positions:
         uid = pos["user_id"]
+        codes = plan.get(pos["position"], [])
+        site_name = esc(pos["site_username"])
         if not uid:
-            out.append(f"{idx}. {esc(pos['site_username'])} — ❌ пусто")
+            out.append(f"{idx}. {site_name} — ❌ пусто")
+        elif not codes:
+            out.append(f"{idx}. {site_name} — ❌ не получит промо")
         else:
-            codes = plan.get(pos['position'], [])
-            if not codes:
-                out.append(f"{idx}. {esc(pos['site_username'])} — ❌ не получит промо")
-            else:
-                out.append(f"{idx}. {esc(pos['site_username'])}")
-                for i, code in enumerate(codes, start=1):
-                    out.append(f"   ├─ <code>{esc(code)}</code>")
-                suffix = "✅ (полный комплект)" if len(codes) >= 3 else f"⚠️ ({len(codes)} шт.)"
-                out.append(f"   {suffix}")
+            out.append(f"{idx}. {site_name}")
+            for code in codes:
+                out.append(f"   ├─ <code>{esc(code)}</code>")
+            suffix = (
+                "✅ (полный комплект)"
+                if len(codes) >= 3 else
+                f"⚠️ ({len(codes)} шт.)"
+            )
+            out.append(f"   {suffix}")
         idx += 1
 
-    # --- 👇 добавляем пользователей вне weekly_users ---
-    extras = {k: v for k, v in plan.items() if isinstance(k, str) and k.startswith("site:")}
+    # --- 3️⃣ Добавляем пользователей вне weekly_users ---
+    extras = {
+        k: v for k, v in plan.items()
+        if isinstance(k, str) and k.startswith("site:")
+    }
     if extras:
         out.append("\n📦 Персональные пользователи вне недельного списка:")
-        for key, codes in extras.items():
+        sorted_extras = sorted(extras.items(), key=lambda x: x[0].lower())
+        for key, codes in sorted_extras:
             site = key.split(":", 1)[1]
             out.append(f"— {esc(site)}")
-            for i, code in enumerate(codes, start=1):
+            for code in codes:
                 out.append(f"   ├─ <code>{esc(code)}</code>")
-            suffix = "✅ (полный комплект)" if len(codes) >= 3 else f"⚠️ ({len(codes)} шт.)"
+            suffix = (
+                "✅ (полный комплект)"
+                if len(codes) >= 3 else
+                f"⚠️ ({len(codes)} шт.)"
+            )
             out.append(f"   {suffix}")
 
-    # --- безопасная отправка длинных сообщений ---
+    # --- 4️⃣ Безопасная отправка длинных сообщений ---
     await send_long_message(bot, callback.message.chat.id, "\n".join(out))
     await callback.answer()
 
