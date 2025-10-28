@@ -17,7 +17,7 @@ from aiohttp import web
 import re
 
 # ---------------- CONFIG ----------------
-# Token: keep fallback to original value so local usage doesn't break; you can set BOT_TOKEN in env on Render
+# Token: keep fallback to original value so local usage doesn't break; you can  BOT_TOKEN in env on Render
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 admin_ids_str = os.getenv("ADMIN_IDS", "")
 try:
@@ -26,7 +26,7 @@ except ValueError:
     ADMIN_IDS = []
 PROMO_PATTERN = re.compile(r"^[A-Z0-9]{4}-[A-Z0-9]{4}$")
 
-# ---------------- DB SETUP (Postgres if DATABASE_URL present, otherwise fallback to SQLite) ----------------
+# ---------------- DB UP (Postgres if DATABASE_URL present, otherwise fallback to SQLite) ----------------
 USE_POSTGRES = False
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -164,7 +164,7 @@ if DATABASE_URL:
         """)
 
         c.execute("""
-        CREATE TABLE IF NOT EXISTS settings (
+        CREATE TABLE IF NOT EXISTS tings (
             key TEXT PRIMARY KEY,
             value TEXT
         );
@@ -194,9 +194,9 @@ if DATABASE_URL:
 
     # ---------------- Инициализация настроек ----------------
     with get_cursor() as c:
-        c.execute("INSERT INTO settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING",
+        c.execute("INSERT INTO tings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING",
                   ("weekly_confirmed", "0"))
-        c.execute("INSERT INTO settings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING",
+        c.execute("INSERT INTO tings (key, value) VALUES (%s, %s) ON CONFLICT (key) DO NOTHING",
                   ("last_distribution_date", ""))
 
 else:
@@ -232,7 +232,7 @@ else:
     """)
 
     cur.execute("""
-    CREATE TABLE IF NOT EXISTS settings (
+    CREATE TABLE IF NOT EXISTS tings (
         key TEXT PRIMARY KEY,
         value TEXT
     );
@@ -260,9 +260,9 @@ else:
     );
     """)
 
-    # default settings initialization (sqlite style)
-    cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", ("weekly_confirmed", "0"))
-    cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", ("last_distribution_date", ""))
+    # default tings initialization (sqlite style)
+    cur.execute("INSERT OR IGNORE INTO tings (key, value) VALUES (?, ?)", ("weekly_confirmed", "0"))
+    cur.execute("INSERT OR IGNORE INTO tings (key, value) VALUES (?, ?)", ("last_distribution_date", ""))
 
 # ---------------- BOT / DISPATCHER / SCHEDULER ----------------
 storage = MemoryStorage()
@@ -275,12 +275,12 @@ def esc(s: Optional[str]) -> str:
         return "-"
     return html.escape(str(s))
 
-def db_get_setting(key: str) -> str:
+def db_get_ting(key: str) -> str:
     with get_cursor() as c:
         if USE_POSTGRES:
-            c.execute("SELECT value FROM settings WHERE key = %s", (key,))
+            c.execute("SELECT value FROM tings WHERE key = %s", (key,))
         else:
-            c.execute("SELECT value FROM settings WHERE key = ?", (key,))
+            c.execute("SELECT value FROM tings WHERE key = ?", (key,))
         r = c.fetchone()
         return r["value"] if r else ""
 
@@ -474,7 +474,6 @@ async def cmd_promo(message: Message):
         return
 
     week = get_week_start()
-    # make explicit timestamp string YYYY-MM-DD HH:MM:SS (compatible with both Postgres and SQLite)
     week_start_dt = datetime.combine(week, datetime.min.time())
     week_start_str = week_start_dt.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -502,8 +501,26 @@ async def cmd_promo(message: Message):
     issued_codes = [r["code"] for r in rows]
     header = "Привет, твой промокод за недельный топ 🎉🎉🎉\n1.5к камней\n\n"
     promo_lines = [f"{i+1}. <code>{esc(c)}</code>" for i, c in enumerate(issued_codes)]
-    footer = "\n\n👉 <a href=\"https://animestars.org/promo_codes\">animestars.org</a>\n👉 <a href=\"https://asstars.tv/promo_codes\">asstars.tv</a>"
-    await message.answer(header + "\n".join(promo_lines) + footer)
+    footer = (
+        "\n\n👉 <a href=\"https://animestars.org/promo_codes\">animestars.org</a>\n"
+        "👉 <a href=\"https://asstars.tv/promo_codes\">asstars.tv</a>"
+    )
+
+    # 🔹 Загружаем картинку из настроек (или дефолтную)
+    promo_image_url = db_get_setting("promo_image_url") or "https://i.pinimg.com/736x/57/0e/36/570e369dd5d45664c79ad8f2caa6d20e.jpg"
+
+    # 🔹 Отправляем как фото с подписью
+    try:
+        await message.bot.send_photo(
+            chat_id=tg_id,
+            photo=promo_image_url,
+            caption=header + "\n".join(promo_lines) + footer,
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        # если отправка картинки не удалась, просто отправляем текстом
+        print(f"[WARN] Не удалось отправить фото пользователю {tg_id}: {e}")
+        await message.answer(header + "\n".join(promo_lines) + footer, parse_mode="HTML")
 
 # ---------------- PENDING: list + approve/reject callbacks ----------------
 @dp.message(Command("pending"))
@@ -906,13 +923,18 @@ class PromoImageState(StatesGroup):
 async def cmd_promo_image(message: Message, state: FSMContext):
     if message.from_user.id not in ADMIN_IDS:
         return
+
     current_url = db_get_setting("promo_image_url")
     if not current_url:
-        current_url = "❌ (не установлена)"
+        current_url = "❌ (не установлена — используется стандартная)"
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Заменить", callback_data="promo_image_replace")]
+        [InlineKeyboardButton(text="🔄 Заменить", callback_data="promo_image_replace")],
+        [InlineKeyboardButton(text="🗑 Удалить", callback_data="promo_image_delete")]
     ])
-    await message.answer(f"🖼 Текущая картинка для сообщений о промо:\n{current_url}", reply_markup=kb)
+    await message.answer(
+        f"🖼 Текущая картинка для сообщений о промо:\n{current_url}",
+        reply_markup=kb
+    )
 
 @dp.callback_query(lambda c: c.data == "promo_image_replace")
 async def cb_promo_image_replace(callback: types.CallbackQuery, state: FSMContext):
@@ -929,12 +951,22 @@ async def process_new_promo_image(message: Message, state: FSMContext):
         return
     url = message.text.strip()
     if not re.match(r"^https?://[^\s]+$", url):
-        await message.answer("❌ Неверная ссылка. Убедитесь, что начинается с http(s)://")
+        await message.answer("❌ Неверная ссылка. Убедитесь, что она начинается с http:// или https://")
         return
     # сохраняем ссылку
     db_set_setting("promo_image_url", url)
     await message.answer(f"✅ Новая картинка успешно установлена:\n{url}")
     await state.clear()
+
+@dp.callback_query(lambda c: c.data == "promo_image_delete")
+async def cb_promo_image_delete(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет прав")
+        return
+
+    db_set_setting("promo_image_url", None)
+    await callback.message.answer("🗑 Картинка успешно удалена. Теперь будет использоваться стандартная по умолчанию.")
+    await callback.answer()
 
 # ---------------- ASSIGN ----------------
 @dp.message(Command("assign"))
@@ -2171,7 +2203,7 @@ async def set_commands():
     ]
     admin_cmds = [
         types.BotCommand(command="pending", description="Заявки на регистрацию"),
-        types.BotCommand(command="setpromoimage", description="Установить картинку / GIF для промо")
+        types.BotCommand(command="setpromoimage", description="Установить картинку / GIF для промо"),
         types.BotCommand(command="addpromo", description="Добавить 3 промо (интерактивно)"),
         types.BotCommand(command="givepromo", description="Выдать промо вручную"),
         types.BotCommand(command="limit", description="Настройки лимитов промокодов"),
@@ -2191,7 +2223,7 @@ async def set_commands():
     # per-admin (chat scope)
     for aid in ADMIN_IDS:
         try:
-            await bot.set_my_commands(user_cmds + admin_cmds, scope=types.BotCommandScopeChat(chat_id=aid))
+            await bot._my_commands(user_cmds + admin_cmds, scope=types.BotCommandScopeChat(chat_id=aid))
         except:
             pass
 
@@ -2205,14 +2237,14 @@ async def start_webserver():
     app = web.Application()
     app.router.add_get("/", handle)   # health-check на /
     runner = web.AppRunner(app)
-    await runner.setup()
+    await runner.up()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
     print(f"✅ Web server started on port {PORT}")
 
 async def main():
     ensure_limit_tables()
-    await set_commands()
+    await _commands()
     # запускаем webserver и polling одновременно
     await asyncio.gather(
         start_webserver(),
