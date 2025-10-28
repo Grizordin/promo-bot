@@ -673,6 +673,17 @@ async def addpromo_uses(message: Message, state: FSMContext):
     # Показать статистику
     await cmd_promostats(message)
 
+# ---------------- SETUSERS (upload .txt or paste) ----------------
+@dp.message(Command("setusers"))
+async def cmd_setusers(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    await message.answer(
+        "Пришлите .txt файл со списком site_nicks (по одному в строке) "
+        "или вставьте список в сообщении."
+    )
+    await state.set_state(SetUsersState.waiting_for_file)
+    
 @dp.message(SetUsersState.waiting_for_file)
 async def process_setusers_file(message: Message, state: FSMContext):
     if message.document:
