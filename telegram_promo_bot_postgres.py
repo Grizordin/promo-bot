@@ -292,6 +292,15 @@ def db_set_setting(key: str, value: str):
             # sqlite: REPLACE INTO will insert or replace existing row
             c.execute("REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
 
+def db_get_setting(key: str):
+    with get_cursor() as c:
+        if USE_POSTGRES:
+            c.execute("SELECT value FROM settings WHERE key = %s", (key,))
+        else:
+            c.execute("SELECT value FROM settings WHERE key = ?", (key,))
+        row = c.fetchone()
+        return row["value"] if row else None
+
 def get_week_start() -> date:
     today = datetime.now(timezone.utc).date()
     weekday = today.weekday()  # 0=Mon ... 6=Sun
