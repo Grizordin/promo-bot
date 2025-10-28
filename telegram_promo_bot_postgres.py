@@ -2235,9 +2235,9 @@ async def handle(request):
 
 async def start_webserver():
     app = web.Application()
-    app.router.add_get("/", handle)   # health-check на /
+    app.router.add_get("/", handle)  # health-check на /
     runner = web.AppRunner(app)
-    await runner.up()
+    await runner.setup()  # <-- заменено с .up() на .setup()
     site = web.TCPSite(runner, "0.0.0.0", PORT)
     await site.start()
     print(f"✅ Web server started on port {PORT}")
