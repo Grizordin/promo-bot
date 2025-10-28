@@ -1989,9 +1989,21 @@ async def cb_manual_confirm(callback: types.CallbackQuery):
                 header = "Привет, твой промокод за недельный топ 🎉🎉🎉\n1.5к камней\n\n"
                 promo_lines = [f"{i+1}. <code>{esc(c)}</code>" for i, c in enumerate(issued)]
                 footer = "\n\n👉 <a href=\"https://animestars.org/promo_codes\">animestars.org</a>\n👉 <a href=\"https://asstars.tv/promo_codes\">asstars.tv</a>"
-                await bot.send_message(tg_id, header + "\n".join(promo_lines) + footer)
-            except:
+
+                # 🔹 ссылка на картинку (замени на свою)
+                promo_image_url = "https://i.pinimg.com/736x/57/0e/36/570e369dd5d45664c79ad8f2caa6d20e.jpg"
+
+                # Отправляем фото с подписью
+                await bot.send_photo(
+                    chat_id=tg_id,
+                    photo=promo_image_url,
+                    caption=header + "\n".join(promo_lines) + footer,
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                print(f"Не удалось отправить фото пользователю {tg_id}: {e}")
                 pass
+
 
     db_set_setting("last_distribution_date", str(get_week_start()))
     await callback.message.edit_text("Ручная раздача выполнена.")
