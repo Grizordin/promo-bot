@@ -1592,11 +1592,11 @@ async def cb_report_delete_confirm(callback: types.CallbackQuery):
         except:
             pass
 
-# ---------------- DISTRIBUTION ALGORITHM (final stable) ----------------
+# ---------------- DISTRIBUTION ALGORITHM (final fixed version) ----------------
 def compute_allocation_ordered() -> Dict[Union[int, str], List[str]]:
     """
     Алгоритм распределения промокодов:
-      1. Добавляем пользователей с лимитами, если их нет в weekly.
+      1. Добавляем пользователей с лимитами, если их нет в weekly (в виртуальный список).
       2. Топ N получают по 3 промо.
       3. Пользователи с персональными лимитами — по лимиту (макс. 3).
       4. Остальные получают 1 промо +1 сверху списка (макс. 2).
@@ -1608,14 +1608,22 @@ def compute_allocation_ordered() -> Dict[Union[int, str], List[str]]:
     week = get_week_start()
 
     with get_cursor() as c:
-        # 1) Загружаем недельный список
+        # 1️⃣ Загружаем недельный список
         if USE_POSTGRES:
-            c.execute("SELECT position, user_id, site_username FROM weekly_users WHERE week_start = %s ORDER BY position", (week,))
+            c.execute(
+                "SELECT position, user_id, site_username "
+                "FROM weekly_users WHERE week_start = %s ORDER BY position",
+                (week,)
+            )
         else:
-            c.execute("SELECT position, user_id, site_username FROM weekly_users WHERE week_start = ? ORDER BY position", (week,))
+            c.execute(
+                "SELECT position, user_id, site_username "
+                "FROM weekly_users WHERE week_start = ? ORDER BY position",
+                (week,)
+            )
         positions = c.fetchall()
 
-        # 2) Последние промокоды
+        # 2️⃣ Последние промокоды
         c.execute("""
             SELECT id, code, total_uses, used
             FROM promocodes
@@ -1624,6 +1632,7 @@ def compute_allocation_ordered() -> Dict[Union[int, str], List[str]]:
         """)
         promos = c.fetchall()
 
+    # --- Подготовка промокодов ---
     promo_iter = [
         {"id": p["id"], "code": p["code"], "remaining": max(0, p["total_uses"] - p["used"])}
         for p in promos if (p["total_uses"] - p["used"]) > 0
@@ -1635,7 +1644,7 @@ def compute_allocation_ordered() -> Dict[Union[int, str], List[str]]:
     if distributable <= 0:
         return {}
 
-    # --- Лимиты ---
+    # --- Настройки лимитов ---
     try:
         top_limit = get_top_limit()
     except Exception:
@@ -1644,7 +1653,10 @@ def compute_allocation_ordered() -> Dict[Union[int, str], List[str]]:
     with get_cursor() as c:
         c.execute("SELECT site, limit_count FROM promo_limits ORDER BY site ASC")
         rows = c.fetchall()
-        personal_limits = {r["site"].lower(): min(r["limit_count"], MAX_PER_USER) for r in rows if r["site"]}
+        personal_limits = {
+            r["site"].lower(): min(r["limit_count"], MAX_PER_USER)
+            for r in rows if r["site"]
+        }
 
     # --- Карта site -> index ---
     site_to_index = {p["site_username"].lower(): i for i, p in enumerate(positions) if p["site_username"]}
@@ -1655,21 +1667,33 @@ def compute_allocation_ordered() -> Dict[Union[int, str], List[str]]:
         with get_cursor() as c:
             sites = list(personal_limits.keys())
             if USE_POSTGRES:
-                c.execute("SELECT LOWER(site_username) AS site_username, tg_id FROM users WHERE LOWER(site_username) = ANY(%s)", (sites,))
+                c.execute(
+                    "SELECT LOWER(site_username) AS site_username, tg_id "
+                    "FROM users WHERE LOWER(site_username) = ANY(%s)",
+                    (sites,)
+                )
             else:
                 placeholders = ",".join("?" for _ in sites)
-                c.execute(f"SELECT LOWER(site_username) AS site_username, tg_id FROM users WHERE LOWER(site_username) IN ({placeholders})", sites)
+                c.execute(
+                    f"SELECT LOWER(site_username) AS site_username, tg_id "
+                    f"FROM users WHERE LOWER(site_username) IN ({placeholders})",
+                    sites
+                )
             site_map = {r["site_username"]: r["tg_id"] for r in c.fetchall()}
 
         for site_norm in personal_limits:
             if site_norm not in existing_sites:
                 positions.append({
-                    "position": len(positions) + 1,
+                    "position": len(positions) + 1,  # виртуальная позиция
                     "user_id": site_map.get(site_norm),
                     "site_username": site_norm
                 })
-                site_to_index[site_norm] = len(positions) - 1
                 existing_sites.add(site_norm)
+
+    # --- Пересобираем карту site -> index после добавления ---
+    site_to_index = {
+        p["site_username"].lower(): i for i, p in enumerate(positions) if p["site_username"]
+    }
 
     n_positions = len(positions)
     allocated = [0] * n_positions
@@ -1700,23 +1724,24 @@ def compute_allocation_ordered() -> Dict[Union[int, str], List[str]]:
     for i in range(n_positions):
         if distributable <= 0:
             break
-        # Не трогаем тех, кто уже получил от топов или персональных лимитов
         if allocated[i] == 0:
             allocated[i] = 1
             distributable -= 1
 
-    # --- 4️⃣ Остаток — по 1 сверху, но не более 2 для "обычных" ---
+    # --- 4️⃣ Остаток — по 1 сверху (макс. 2 для обычных, 3 для лимитных) ---
     idx = 0
     while distributable > 0 and n_positions > 0:
         pos = idx % n_positions
-        if allocated[pos] < (MAX_FOR_OTHERS if positions[pos]["site_username"].lower() not in personal_limits else MAX_PER_USER):
+        site = positions[pos]["site_username"].lower() if positions[pos]["site_username"] else ""
+        max_allowed = MAX_PER_USER if site in personal_limits else MAX_FOR_OTHERS
+        if allocated[pos] < max_allowed:
             allocated[pos] += 1
             distributable -= 1
         idx += 1
         if idx > n_positions * 3:
             break
 
-    # --- 5️⃣ Назначаем коды (реальные weekly позиции) ---
+    # --- 5️⃣ Формирование плана выдачи ---
     distribution_plan: Dict[Union[int, str], List[str]] = {}
     promo_idx = 0
     n_promos = len(promo_iter)
@@ -1739,13 +1764,13 @@ def compute_allocation_ordered() -> Dict[Union[int, str], List[str]]:
                 used_codes.add(cand)
                 promo_idx = i
                 break
-        # сохраняем по позиции (weekly)
-        distribution_plan[positions[pos_idx]["position"]] = codes
+        key = positions[pos_idx]["position"]
+        distribution_plan[key] = codes
 
-    # --- 6️⃣ Добавляем в план пользователей с лимитом, которых нет в weekly ---
+    # --- 6️⃣ Добавляем "вне списка" (у которых не было позиции) ---
     for site_norm, limit in personal_limits.items():
         if site_norm in site_to_index:
-            continue  # уже учтён
+            continue
         give = min(limit, MAX_PER_USER)
         if give <= 0 or distributable <= 0:
             continue
@@ -1798,38 +1823,83 @@ async def cb_manual_plan(callback: types.CallbackQuery):
     if callback.from_user.id not in ADMIN_IDS:
         await callback.answer("Нет прав")
         return
+
     plan = compute_allocation_ordered()
     if not plan:
         await callback.answer("Невозможно построить план.")
         return
+
     out = ["📊 План распределения (ручная раздача):"]
-    idx = 1
     week = get_week_start()
+
+    # --- Загружаем список позиций недели ---
     with get_cursor() as c:
         if USE_POSTGRES:
-            c.execute("SELECT position, site_username, user_id FROM weekly_users WHERE week_start = %s ORDER BY position", (week,))
+            c.execute(
+                "SELECT position, site_username, user_id "
+                "FROM weekly_users WHERE week_start = %s ORDER BY position",
+                (week,)
+            )
         else:
-            c.execute("SELECT position, site_username, user_id FROM weekly_users WHERE week_start = ? ORDER BY position", (week,))
+            c.execute(
+                "SELECT position, site_username, user_id "
+                "FROM weekly_users WHERE week_start = ? ORDER BY position",
+                (week,)
+            )
         positions = c.fetchall()
+
+    # --- Основной недельный список ---
+    idx = 1
     for pos in positions:
         uid = pos["user_id"]
+        site = pos["site_username"] or "-"
+        codes = plan.get(pos["position"], [])
+
         if not uid:
-            out.append(f"{idx}. {esc(pos['site_username'])} — ❌ пусто")
+            out.append(f"{idx}. {esc(site)} — ❌ пусто")
+        elif not codes:
+            out.append(f"{idx}. {esc(site)} — ❌ не получит промо")
         else:
-            codes = plan.get(pos['position'], [])
-            if not codes:
-                out.append(f"{idx}. {esc(pos['site_username'])} — ❌ не получит промо")
-            else:
-                out.append(f"{idx}. {esc(pos['site_username'])}")
-                for i, code in enumerate(codes, start=1):
-                    out.append(f"   ├─ <code>{esc(code)}</code>")
-                suffix = "✅ (полный комплект)" if len(codes) >= 3 else f"⚠️ ({len(codes)} шт.)"
-                out.append(f"   {suffix}")
+            out.append(f"{idx}. {esc(site)}")
+            for i, code in enumerate(codes, start=1):
+                out.append(f"   ├─ <code>{esc(code)}</code>")
+            suffix = (
+                "✅ (полный комплект)"
+                if len(codes) >= 3
+                else f"⚠️ ({len(codes)} шт.)"
+            )
+            out.append(f"   {suffix}")
         idx += 1
-        if len(out) > 400:
-            out.append("... (обрезано)")
-            break
-    await callback.message.answer("\n".join(out))
+
+    # --- Пользователи, которых нет в weekly (site:...) ---
+    extras = {k: v for k, v in plan.items() if isinstance(k, str) and k.startswith("site:")}
+    if extras:
+        out.append("\n📦 Пользователи с персональными лимитами (вне недельного списка):")
+        for key, codes in extras.items():
+            site = key.split(":", 1)[1]
+            out.append(f"• {esc(site)}")
+            for i, code in enumerate(codes, start=1):
+                out.append(f"   ├─ <code>{esc(code)}</code>")
+            suffix = (
+                "✅ (полный комплект)"
+                if len(codes) >= 3
+                else f"⚠️ ({len(codes)} шт.)"
+            )
+            out.append(f"   {suffix}")
+
+    # --- Безопасная отправка длинных сообщений ---
+    text = "\n".join(out)
+    if len(text) > 4000:
+        while len(text) > 0:
+            chunk = text[:3900]
+            split_at = chunk.rfind("\n")
+            if split_at != -1:
+                chunk = chunk[:split_at]
+            await callback.message.answer(chunk)
+            text = text[len(chunk):]
+    else:
+        await callback.message.answer(text)
+
     await callback.answer()
 
 @dp.callback_query(lambda c: c.data == "manual_confirm")
