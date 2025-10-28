@@ -464,6 +464,59 @@ async def process_registration_nick(message: Message, state: FSMContext):
     await message.answer(f"Ваша заявка отправлена администраторам. Ник: <code>{esc(site_nick)}</code>")
     await state.clear()
 
+# ---------------- PROMO IMAGE MANAGEMENT ----------------
+class PromoImageState(StatesGroup):
+    waiting_for_url = State()
+
+@dp.message(Command("promo_image"))
+async def cmd_promo_image(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+
+    current_url = db_get_setting("promo_image_url")
+    if not current_url:
+        current_url = "❌ (не установлена — используется стандартная)"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Заменить", callback_data="promo_image_replace")],
+        [InlineKeyboardButton(text="🗑 Удалить", callback_data="promo_image_delete")]
+    ])
+    await message.answer(
+        f"🖼 Текущая картинка для сообщений о промо:\n{current_url}",
+        reply_markup=kb
+    )
+
+@dp.callback_query(lambda c: c.data == "promo_image_replace")
+async def cb_promo_image_replace(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет прав")
+        return
+    await callback.message.answer("📤 Пришлите ссылку на новую картинку или GIF (https://...)")
+    await state.set_state(PromoImageState.waiting_for_url)
+    await callback.answer()
+
+@dp.message(PromoImageState.waiting_for_url)
+async def process_new_promo_image(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    url = message.text.strip()
+    if not re.match(r"^https?://[^\s]+$", url):
+        await message.answer("❌ Неверная ссылка. Убедитесь, что она начинается с http:// или https://")
+        return
+    # сохраняем ссылку
+    db_set_setting("promo_image_url", url)
+    await message.answer(f"✅ Новая картинка успешно установлена:\n{url}")
+    await state.clear()
+
+@dp.callback_query(lambda c: c.data == "promo_image_delete")
+async def cb_promo_image_delete(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет прав")
+        return
+
+    db_set_setting("promo_image_url", None)
+    await callback.message.answer("🗑 Картинка успешно удалена. Теперь будет использоваться стандартная по умолчанию.")
+    await callback.answer()
+
 # ---------------- USER: /promo ----------------
 @dp.message(Command("promo"))
 async def cmd_promo(message: Message):
@@ -914,59 +967,6 @@ async def cb_users_free(callback: types.CallbackQuery):
 
     if batch:
         await callback.message.answer("\n".join(batch))
-
-# ---------------- PROMO IMAGE MANAGEMENT ----------------
-class PromoImageState(StatesGroup):
-    waiting_for_url = State()
-
-@dp.message(Command("promo_image"))
-async def cmd_promo_image(message: Message, state: FSMContext):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-
-    current_url = db_get_setting("promo_image_url")
-    if not current_url:
-        current_url = "❌ (не установлена — используется стандартная)"
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Заменить", callback_data="promo_image_replace")],
-        [InlineKeyboardButton(text="🗑 Удалить", callback_data="promo_image_delete")]
-    ])
-    await message.answer(
-        f"🖼 Текущая картинка для сообщений о промо:\n{current_url}",
-        reply_markup=kb
-    )
-
-@dp.callback_query(lambda c: c.data == "promo_image_replace")
-async def cb_promo_image_replace(callback: types.CallbackQuery, state: FSMContext):
-    if callback.from_user.id not in ADMIN_IDS:
-        await callback.answer("Нет прав")
-        return
-    await callback.message.answer("📤 Пришлите ссылку на новую картинку или GIF (https://...)")
-    await state.set_state(PromoImageState.waiting_for_url)
-    await callback.answer()
-
-@dp.message(PromoImageState.waiting_for_url)
-async def process_new_promo_image(message: Message, state: FSMContext):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    url = message.text.strip()
-    if not re.match(r"^https?://[^\s]+$", url):
-        await message.answer("❌ Неверная ссылка. Убедитесь, что она начинается с http:// или https://")
-        return
-    # сохраняем ссылку
-    db_set_setting("promo_image_url", url)
-    await message.answer(f"✅ Новая картинка успешно установлена:\n{url}")
-    await state.clear()
-
-@dp.callback_query(lambda c: c.data == "promo_image_delete")
-async def cb_promo_image_delete(callback: types.CallbackQuery):
-    if callback.from_user.id not in ADMIN_IDS:
-        await callback.answer("Нет прав")
-        return
-
-    db_set_setting("promo_image_url", None)
-    await callback.message.answer("🗑 Картинка успешно удалена. Теперь будет использоваться стандартная по умолчанию.")
-    await callback.answer()
 
 # ---------------- ASSIGN ----------------
 @dp.message(Command("assign"))
