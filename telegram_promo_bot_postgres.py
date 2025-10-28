@@ -477,8 +477,9 @@ async def process_registration_nick(message: Message, state: FSMContext):
 class PromoImageState(StatesGroup):
     waiting_for_url = State()
 
-@dp.message(Command("promo_image"))
-async def cmd_promo_image(message: Message, state: FSMContext):
+@dp.message(Command("setpromoimage"))
+async def cmd_setpromoimage(message: Message, state: FSMContext):
+    """Команда для управления картинкой / GIF для промо сообщений"""
     if message.from_user.id not in ADMIN_IDS:
         return
 
@@ -509,9 +510,8 @@ async def process_new_promo_image(message: Message, state: FSMContext):
         return
     url = message.text.strip()
     if not re.match(r"^https?://[^\s]+$", url):
-        await message.answer("❌ Неверная ссылка. Убедитесь, что она начинается с http:// или https://")
+        await message.answer("❌ Неверная ссылка. Убедитесь, что начинается с http:// или https://")
         return
-    # сохраняем ссылку
     db_set_setting("promo_image_url", url)
     await message.answer(f"✅ Новая картинка успешно установлена:\n{url}")
     await state.clear()
