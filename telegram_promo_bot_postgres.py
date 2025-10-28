@@ -1672,57 +1672,43 @@ def compute_allocation_ordered() -> Dict[Union[int, str], List[str]]:
         if distributable <= 0:
             break
 
-    # --- (D) Персональные лимиты для тех, кто В списке (увеличиваем до лимита, не выше MAX_PER_USER) ---
+    # --- (D) Персональные лимиты: и для weekly, и для вне weekly ---
+    extras: List[Tuple[str, Union[int, None], int]] = []  # (site_original, tg_id, give_count)
+    site_map = {}
+    if personal_limits:
+        with get_cursor() as c:
+            sites = list(personal_limits.keys())
+            if USE_POSTGRES:
+                c.execute("SELECT LOWER(site_username) AS site_username, tg_id FROM users WHERE LOWER(site_username) = ANY(%s)", (sites,))
+            else:
+                placeholders = ",".join("?" for _ in sites)
+                c.execute(f"SELECT LOWER(site_username) AS site_username, tg_id FROM users WHERE LOWER(site_username) IN ({placeholders})", sites)
+            for r in c.fetchall():
+                site_map[r["site_username"]] = r["tg_id"]
+
     for site_norm, limit in personal_limits.items():
+        desired = min(limit, MAX_PER_USER)
+
         if site_norm in site_to_index:
+            # пользователь в недельном списке
             idx = site_to_index[site_norm]
             already = allocated[idx]
-            desired = min(limit, MAX_PER_USER)
             need = max(0, desired - already)
             if need > 0 and distributable > 0:
                 give = min(need, distributable)
                 allocated[idx] += give
                 distributable -= give
             applied_personal_sites.add(site_norm)
+        else:
+            # пользователь вне списка
+            tg = site_map.get(site_norm)
             if distributable <= 0:
                 break
-
-    # --- (E) Персональные лимиты для тех, кого НЕТ в списке (extras) ---
-    extras: List[Tuple[str, Union[int,None], int]] = []  # (site_original, tg_id or None, give_count)
-    site_map = {}
-    if personal_limits:
-        with get_cursor() as c:
-            sites = list(personal_limits.keys())
-            if USE_POSTGRES:
-                # передаём список в ANY(%s) как array
-                c.execute("SELECT site_username, tg_id FROM users WHERE LOWER(site_username) = ANY(%s)", (sites,))
-                # Note: если ваш driver/pg не поддерживает этот синтаксис с lower/any, можно использовать IN и list
-            else:
-                # sqlite: используем IN (?,?,...)
-                placeholders = ",".join("?" for _ in sites)
-                c.execute(f"SELECT site_username, tg_id FROM users")
-                # we'll build site_map from fetched rows
-            for r in c.fetchall():
-                key = (r["site_username"].lower() if r.get("site_username") else r.get("site_username"))
-                site_map[key] = r.get("tg_id")
-
-    # собираем extras для тех site, которые не в weekly (и не уже применены)
-    for site_norm, limit in personal_limits.items():
-        if site_norm in applied_personal_sites:
-            continue
-        # не добавляем в extras, если этот site всё же присутствует в weekly map (доп. безопасность)
-        if site_norm in site_to_index:
-            applied_personal_sites.add(site_norm)
-            continue
-        tg = site_map.get(site_norm)  # может быть None
-        give = min(limit, distributable, MAX_PER_USER)
-        if give <= 0:
-            continue
-        extras.append((site_norm, tg, give))
-        distributable -= give
-        applied_personal_sites.add(site_norm)
-        if distributable <= 0:
-            break
+            give = min(desired, distributable)
+            if give > 0:
+                extras.append((site_norm, tg, give))
+                distributable -= give
+                applied_personal_sites.add(site_norm)
 
     # --- (F) Остальные получают по 1 (только если у них ещё 0, и не превышая MAX_PER_USER) ---
     if distributable > 0:
