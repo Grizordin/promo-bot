@@ -1716,7 +1716,7 @@ def compute_allocation_ordered() -> Dict[Union[int, str], List[str]]:
         if idx > n_positions * 3:
             break
 
-    # --- 5️⃣ Назначаем коды ---
+    # --- 5️⃣ Назначаем коды (реальные weekly позиции) ---
     distribution_plan: Dict[Union[int, str], List[str]] = {}
     promo_idx = 0
     n_promos = len(promo_iter)
@@ -1739,7 +1739,33 @@ def compute_allocation_ordered() -> Dict[Union[int, str], List[str]]:
                 used_codes.add(cand)
                 promo_idx = i
                 break
+        # сохраняем по позиции (weekly)
         distribution_plan[positions[pos_idx]["position"]] = codes
+
+    # --- 6️⃣ Добавляем в план пользователей с лимитом, которых нет в weekly ---
+    for site_norm, limit in personal_limits.items():
+        if site_norm in site_to_index:
+            continue  # уже учтён
+        give = min(limit, MAX_PER_USER)
+        if give <= 0 or distributable <= 0:
+            continue
+        codes = []
+        used_codes = set()
+        for _ in range(give):
+            for offset in range(n_promos):
+                i = (promo_idx + offset) % n_promos
+                if promo_iter[i]["remaining"] <= 0:
+                    continue
+                cand = promo_iter[i]["code"]
+                if cand in used_codes:
+                    continue
+                promo_iter[i]["remaining"] -= 1
+                codes.append(cand)
+                used_codes.add(cand)
+                promo_idx = i
+                break
+        if codes:
+            distribution_plan[f"site:{site_norm}"] = codes
 
     return distribution_plan
 
