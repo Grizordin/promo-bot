@@ -2232,7 +2232,7 @@ async def set_commands():
     # per-admin (chat scope)
     for aid in ADMIN_IDS:
         try:
-            await bot._my_commands(user_cmds + admin_cmds, scope=types.BotCommandScopeChat(chat_id=aid))
+            await bot.set_my_commands(user_cmds + admin_cmds, scope=types.BotCommandScopeChat(chat_id=aid))
         except:
             pass
 
