@@ -898,6 +898,44 @@ async def cb_users_free(callback: types.CallbackQuery):
     if batch:
         await callback.message.answer("\n".join(batch))
 
+# ---------------- PROMO IMAGE MANAGEMENT ----------------
+class PromoImageState(StatesGroup):
+    waiting_for_url = State()
+
+@dp.message(Command("promo_image"))
+async def cmd_promo_image(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    current_url = db_get_setting("promo_image_url")
+    if not current_url:
+        current_url = "❌ (не установлена)"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Заменить", callback_data="promo_image_replace")]
+    ])
+    await message.answer(f"🖼 Текущая картинка для сообщений о промо:\n{current_url}", reply_markup=kb)
+
+@dp.callback_query(lambda c: c.data == "promo_image_replace")
+async def cb_promo_image_replace(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("Нет прав")
+        return
+    await callback.message.answer("📤 Пришлите ссылку на новую картинку или GIF (https://...)")
+    await state.set_state(PromoImageState.waiting_for_url)
+    await callback.answer()
+
+@dp.message(PromoImageState.waiting_for_url)
+async def process_new_promo_image(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    url = message.text.strip()
+    if not re.match(r"^https?://[^\s]+$", url):
+        await message.answer("❌ Неверная ссылка. Убедитесь, что начинается с http(s)://")
+        return
+    # сохраняем ссылку
+    db_set_setting("promo_image_url", url)
+    await message.answer(f"✅ Новая картинка успешно установлена:\n{url}")
+    await state.clear()
+
 # ---------------- ASSIGN ----------------
 @dp.message(Command("assign"))
 async def cmd_assign_start(message: Message, state: FSMContext):
@@ -1936,7 +1974,7 @@ async def cb_manual_confirm(callback: types.CallbackQuery):
                 header = "Привет, твой промокод за недельный топ 🎉🎉🎉\n1.5к камней\n\n"
                 promo_lines = [f"{i+1}. <code>{esc(c)}</code>" for i, c in enumerate(issued)]
                 footer = "\n\n👉 <a href=\"https://animestars.org/promo_codes\">animestars.org</a>\n👉 <a href=\"https://asstars.tv/promo_codes\">asstars.tv</a>"
-                promo_image_url = "https://cool.klev.club/uploads/posts/2025-05/289/sho_opyat_1_40e0caa3.jpg"
+                promo_image_url = db_get_setting("promo_image_url") or "https://i.pinimg.com/736x/57/0e/36/570e369dd5d45664c79ad8f2caa6d20e.jpg"
 
                 await bot.send_photo(
                     chat_id=tg_id,
@@ -2133,6 +2171,7 @@ async def set_commands():
     ]
     admin_cmds = [
         types.BotCommand(command="pending", description="Заявки на регистрацию"),
+        types.BotCommand(command="setpromoimage", description="Установить картинку / GIF для промо")
         types.BotCommand(command="addpromo", description="Добавить 3 промо (интерактивно)"),
         types.BotCommand(command="givepromo", description="Выдать промо вручную"),
         types.BotCommand(command="limit", description="Настройки лимитов промокодов"),
