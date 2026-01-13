@@ -564,8 +564,8 @@ async def cmd_promo(message: Message):
     header = "Привет, твой промокод за недельный топ 🎉🎉🎉\n1.5к камней\n\n"
     promo_lines = [f"{i+1}. <code>{esc(c)}</code>" for i, c in enumerate(issued_codes)]
     footer = (
-        "\n\n👉 <a href=\"https://animestars.org/promo_codes\">animestars.org</a>\n"
-        "👉 <a href=\"https://asstars.tv/promo_codes\">asstars.tv</a>"
+        "\n\n👉 <a href=\"https://animesss.com/promo_codes\">animesss.com</a>\n"
+        "👉 <a href=\"https://animesss.tv/promo_codes\">animesss.tv</a>"
     )
 
     # 🔹 Загружаем картинку из настроек (или дефолтную)
@@ -1233,7 +1233,7 @@ async def givepromo_codes_entered(message: Message, state: FSMContext):
     try:
         header = "Привет, твой промокод за недельный топ 🎉🎉🎉\n1.5к камней\n\n"
         promo_lines = [f"{i+1}. <code>{esc(c)}</code>" for i,c in enumerate(issued_codes)]
-        footer = "\n\n👉 <a href=\"https://animestars.org/promo_codes\">animestars.org</a>\n👉 <a href=\"https://asstars.tv/promo_codes\">asstars.tv</a>"
+        footer = "\n\n👉 <a href=\"https://animesss.com/promo_codes\">animesss.com</a>\n👉 <a href=\"https://animesss.tv/promo_codes\">animesss.tv</a>"
         await bot.send_message(tg_id, header + "\n".join(promo_lines) + footer)
     except:
         pass
@@ -2014,7 +2014,7 @@ async def cb_manual_confirm(callback: types.CallbackQuery):
             try:
                 header = "Привет, твой промокод за недельный топ 🎉🎉🎉\n1.5к камней\n\n"
                 promo_lines = [f"{i+1}. <code>{esc(c)}</code>" for i, c in enumerate(issued)]
-                footer = "\n\n👉 <a href=\"https://animestars.org/promo_codes\">animestars.org</a>\n👉 <a href=\"https://asstars.tv/promo_codes\">asstars.tv</a>"
+                footer = "\n\n👉 <a href=\"https://animesss.com/promo_codes\">animesss.com</a>\n👉 <a href=\"https://animesss.tv/promo_codes\">animesss.tv</a>"
                 promo_image_url = db_get_setting("promo_image_url") or "https://i.pinimg.com/736x/57/0e/36/570e369dd5d45664c79ad8f2caa6d20e.jpg"
 
                 await bot.send_photo(
